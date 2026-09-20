@@ -28,13 +28,29 @@ export default function ScrapeStatusPill() {
   }, []);
 
   if (error) {
-    return <span className="pill pill-error" title="Backend / DB unreachable">scrape status: offline</span>;
+    return (
+      <span className="pill pill-error" title="Backend / DB unreachable">
+        <span className="pill-dot" /> scrape: offline
+      </span>
+    );
   }
   if (!status) {
-    return <span className="pill pill-muted">scrape status: …</span>;
+    return (
+      <span className="pill pill-idle">
+        <span className="pill-dot" /> scrape: …
+      </span>
+    );
   }
   if (status.is_running) {
-    return <span className="pill pill-running" title={`started ${status.started_at}`}>scrape: running</span>;
+    return (
+      <span className="pill pill-running" title={`started ${status.started_at}`}>
+        <span className="pill-dot" /> scrape: running
+      </span>
+    );
   }
-  return <span className="pill pill-idle">scrape: idle</span>;
+  return (
+    <span className="pill pill-idle">
+      <span className="pill-dot" /> scrape: idle
+    </span>
+  );
 }

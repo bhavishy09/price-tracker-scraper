@@ -1,11 +1,11 @@
 /**
  * ProductDetail.jsx
  * --------------------------------------------------------------------------
- * Per-product detail view:
+ * Product Detail View:
  *   - Metadata (name, brand, category, SKU)
- *   - Latest price + stock + on-demand scrape button
- *   - Price + stock-over-time chart
- *   - Honest scrape log table (failures included, never hidden)
+ *   - Current latest price & stock + on-demand live scrape button
+ *   - Price & stock history timeline (chart + table view)
+ *   - Full scrape attempt log with honest outcomes (✅, 🔁, ❌)
  */
 
 import React, { useEffect, useState, useCallback } from 'react';
@@ -41,8 +41,8 @@ export default function ProductDetail() {
 
   useEffect(() => {
     loadAll();
-    const t = setInterval(loadAll, 15000);
-    return () => clearInterval(t);
+    const timer = setInterval(loadAll, 12000);
+    return () => clearInterval(timer);
   }, [loadAll]);
 
   const handleScrapeNow = async () => {
@@ -57,38 +57,62 @@ export default function ProductDetail() {
     }
   };
 
-  if (error) return <div className="card"><p className="error-text">{error}</p></div>;
-  if (!tracked) return <div className="card"><p className="muted">Loading…</p></div>;
+  if (error) {
+    return (
+      <div className="product-detail">
+        <div className="back-link">
+          <Link to="/">← Back to dashboard</Link>
+        </div>
+        <div className="card">
+          <p className="error-text">Failed to load product details: {error}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!tracked) {
+    return (
+      <div className="product-detail">
+        <div className="back-link">
+          <Link to="/">← Back to dashboard</Link>
+        </div>
+        <div className="card">
+          <p className="muted">Loading product details…</p>
+        </div>
+      </div>
+    );
+  }
 
   const latestHist = history && history.length > 0 ? history[history.length - 1] : null;
   const latestLog = logs && logs.length > 0 ? logs[0] : null;
 
-  // Determine stock text and status
-  let stockText = 'no scrape yet';
+  let stockText = 'never scraped';
+  let isOutOfStock = false;
   let statusSubtext = '';
 
   if (latestHist) {
     stockText = formatStock(latestHist.stock_quantity);
-    statusSubtext = `last scraped ${relativeTime(latestHist.scraped_at)}`;
+    if (Number(latestHist.stock_quantity) === 0) isOutOfStock = true;
+    statusSubtext = `Last scraped ${relativeTime(latestHist.scraped_at)}`;
   } else if (latestLog && latestLog.outcome === 'failed') {
-    stockText = `Failed: ${latestLog.failure_reason || 'attempt failed'}`;
-    statusSubtext = `attempted ${relativeTime(latestLog.attempted_at)}`;
+    stockText = 'never scraped';
+    statusSubtext = `Last attempt failed: ${latestLog.failure_reason || 'unknown'}`;
   }
 
   return (
     <div className="product-detail">
       <div className="back-link">
-        <Link to="/">← back to dashboard</Link>
+        <Link to="/">← Back to dashboard</Link>
       </div>
 
       <section className="card product-head-card">
         <div>
           <h1 className="product-title">{tracked.name}</h1>
           <div className="product-meta">
-            {tracked.brand} · {tracked.category} · {tracked.sku}
+            {tracked.brand} · {tracked.category} {tracked.sku && `· SKU: ${tracked.sku}`}
           </div>
           <div className="product-meta-fine">
-            INE source id #{tracked.source_product_id} · tracked since {formatDateTime(tracked.added_at)}
+            INE catalog source #{tracked.source_product_id} · Tracked since {formatDateTime(tracked.added_at)}
           </div>
         </div>
 
@@ -96,19 +120,20 @@ export default function ProductDetail() {
           <div className="price-big">
             {latestHist ? formatPrice(latestHist.price) : '—'}
           </div>
-          <div className={`stock-small ${latestLog && latestLog.outcome === 'failed' && !latestHist ? 'error-text' : ''}`}>
+          <div className={`stock-small ${isOutOfStock ? 'stock-out' : ''}`}>
             {stockText}
           </div>
           {statusSubtext && (
-            <div className="muted small">
+            <div className="muted small" style={{ marginTop: '2px' }}>
               {statusSubtext}
             </div>
           )}
           <button
-            className="btn btn-secondary btn-sm"
-            style={{ marginTop: '8px' }}
+            className="btn btn-primary btn-sm"
+            style={{ marginTop: '10px' }}
             disabled={scraping}
             onClick={handleScrapeNow}
+            title="Trigger headless Playwright scraper live for this product"
           >
             {scraping ? 'Scraping live…' : 'Scrape now'}
           </button>
@@ -116,16 +141,22 @@ export default function ProductDetail() {
       </section>
 
       <section className="card">
-        <h2>Price &amp; stock history</h2>
+        <div className="card-title-group" style={{ marginBottom: '14px' }}>
+          <h2>Price &amp; stock history</h2>
+          <p className="muted small">
+            Every successful scrape becomes one point on the timeline, charting price and inventory movements over hours and days.
+          </p>
+        </div>
         <PriceChart history={history} />
       </section>
 
       <section className="card">
-        <h2>Scrape log</h2>
-        <p className="muted small">
-          Every scrape attempt is logged here — success, retried, or failed.
-          Failures are never hidden; the failure reason is shown verbatim.
-        </p>
+        <div className="card-title-group" style={{ marginBottom: '14px' }}>
+          <h2>Scrape log (Honest transparency)</h2>
+          <p className="muted small">
+            Every attempt ever made against this product is recorded here. Nothing is hidden or swept under the rug — failures, timeouts, and bot-challenge retries are logged with their full reason.
+          </p>
+        </div>
         <ScrapeLogTable logs={logs} />
       </section>
     </div>

@@ -1,12 +1,8 @@
 /**
  * App.jsx
  * --------------------------------------------------------------------------
- * Top-level layout. Renders a small header and routes to:
- *   /                  — search + tracked products list (the dashboard)
- *   /product/:id       — per-product detail (price chart + scrape logs)
- *
- * Components are intentionally small and single-purpose so a human can
- * read and safely edit them under interview time pressure.
+ * Top-level application shell with modern black & white navigation bar,
+ * live scrape status indicator, and routing to Dashboard and ProductDetail.
  */
 
 import React from 'react';
@@ -28,8 +24,8 @@ export default function App() {
             <NavLink to="/" end className={({ isActive }) => isActive ? 'active' : ''}>
               Dashboard
             </NavLink>
-            <a href="https://demo.inelabteamdev.com/" target="_blank" rel="noreferrer">
-              Mock store ↗
+            <a href="https://demo.inelabteamdev.com/" target="_blank" rel="noreferrer" className="nav-external">
+              Mock store <span>↗</span>
             </a>
           </nav>
           <ScrapeStatusPill />
@@ -44,7 +40,10 @@ export default function App() {
       </main>
 
       <footer className="app-footer">
-        <span>INE Software Engineer Intern Assignment — Product Price Tracker</span>
+        <div className="app-footer-inner">
+          <span>INE Software Engineer Assignment — Product Price Tracker</span>
+          <span className="muted">Live Anti-Bot Playwright Automation &amp; Price History</span>
+        </div>
       </footer>
     </div>
   );

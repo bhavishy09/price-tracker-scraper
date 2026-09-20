@@ -1,8 +1,15 @@
 /**
  * TrackedProductsList.jsx
  * --------------------------------------------------------------------------
- * Lists tracked products on the dashboard with their latest price, stock,
- * scrape outcome, and on-demand scrape triggers.
+ * Right box on dashboard: "Tracked products".
+ *
+ * Shows every tracked product with:
+ *   - Name (clickable link to /product/:id)
+ *   - Brand / Category
+ *   - Latest known price & stock (or "—" / "never scraped")
+ *   - Scrape status ("scrape: idle" or "scrape: running" or last scraped)
+ *   - On-demand "Scrape" button
+ *   - "✕" untrack button
  */
 
 import React, { useEffect, useState, useCallback } from 'react';
@@ -13,13 +20,18 @@ import { formatPrice, formatStock, relativeTime } from '../lib/format.js';
 export default function TrackedProductsList({ refreshKey }) {
   const [items, setItems] = useState(null);
   const [error, setError] = useState(null);
-  const [busy, setBusy] = useState(null);
+  const [busyUntrackId, setBusyUntrackId] = useState(null);
   const [scrapingId, setScrapingId] = useState(null);
+  const [globalStatus, setGlobalStatus] = useState({ is_running: false });
 
-  const load = useCallback(async () => {
+  const loadData = useCallback(async () => {
     try {
-      const r = await api.listTracked();
-      setItems(r.items || []);
+      const [listRes, statusRes] = await Promise.all([
+        api.listTracked(),
+        api.getScrapeStatus().catch(() => ({ is_running: false })),
+      ]);
+      setItems(listRes.items || []);
+      setGlobalStatus(statusRes);
       setError(null);
     } catch (err) {
       setError(err.message);
@@ -27,55 +39,82 @@ export default function TrackedProductsList({ refreshKey }) {
   }, []);
 
   useEffect(() => {
-    load();
-    // Refresh periodically so live scrapes reflect automatically
-    const timer = setInterval(load, 15000);
-    return () => clearInterval(timer);
-  }, [load, refreshKey]);
+    loadData();
+    const interval = setInterval(loadData, 10000);
+    return () => clearInterval(interval);
+  }, [loadData, refreshKey]);
 
-  const untrack = useCallback(async (id) => {
-    setBusy(id);
+  const handleUntrack = useCallback(async (id) => {
+    setBusyUntrackId(id);
     try {
       await api.untrackProduct(id);
       setItems((prev) => (prev || []).filter((p) => (p.tracked_product_id || p.id) !== id));
     } catch (err) {
       alert(`Failed to untrack: ${err.message}`);
     } finally {
-      setBusy(null);
+      setBusyUntrackId(null);
     }
   }, []);
 
-  const scrapeNow = useCallback(async (id) => {
+  const handleScrapeNow = useCallback(async (id) => {
     setScrapingId(id);
     try {
       await api.scrapeProductNow(id);
-      await load();
+      await loadData();
     } catch (err) {
-      alert(`Scrape failed: ${err.message}`);
+      alert(`Scrape attempt failed: ${err.message}`);
     } finally {
       setScrapingId(null);
     }
-  }, [load]);
+  }, [loadData]);
 
-  if (error) return <p className="error-text">Failed to load tracked products: {error}</p>;
-  if (items === null) return <p className="muted">Loading tracked products…</p>;
+  if (error) {
+    return (
+      <section className="card tracked-card">
+        <h2>Tracked products</h2>
+        <p className="error-text">Failed to load tracked products: {error}</p>
+      </section>
+    );
+  }
+
+  if (items === null) {
+    return (
+      <section className="card tracked-card">
+        <h2>Tracked products</h2>
+        <p className="muted small">Loading tracked products…</p>
+      </section>
+    );
+  }
+
   if (items.length === 0) {
     return (
-      <section className="card">
-        <h2>Tracked products</h2>
-        <p className="muted">Nothing tracked yet. Search above and click “Track”.</p>
+      <section className="card tracked-card">
+        <div className="card-header-row">
+          <div className="card-title-group">
+            <h2>Tracked products <span className="count">(0)</span></h2>
+            <p className="muted small">Nothing tracked yet. Search on the left and click "Track".</p>
+          </div>
+        </div>
+        <div className="empty-state">
+          <p className="muted">Your tracked product list is currently empty.</p>
+        </div>
       </section>
     );
   }
 
   return (
-    <section className="card">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h2>Tracked products <span className="count">({items.length})</span></h2>
+    <section className="card tracked-card">
+      <div className="card-header-row">
+        <div className="card-title-group">
+          <h2>Tracked products <span className="count">({items.length})</span></h2>
+          <p className="muted small">
+            Click any product to view its historical price chart and full scrape logs.
+          </p>
+        </div>
         <button
           className="btn btn-ghost btn-sm"
-          onClick={load}
-          title="Refresh list"
+          onClick={loadData}
+          title="Refresh tracked list"
         >
           ↻ Refresh
         </button>
@@ -88,7 +127,6 @@ export default function TrackedProductsList({ refreshKey }) {
           const brand = p.brand;
           const category = p.category;
 
-          // Support both naming conventions from view and store
           const price = p.latest_price ?? p.price;
           const stock = p.latest_stock ?? p.stock_quantity;
           const scrapedAt = p.latest_scraped_at ?? p.scraped_at;
@@ -96,58 +134,76 @@ export default function TrackedProductsList({ refreshKey }) {
           const lastAttempt = p.last_attempt_at;
           const failureReason = p.failure_reason;
 
-          const isScraping = scrapingId === id;
+          const isRowScraping = scrapingId === id || (globalStatus.is_running && !scrapedAt);
 
-          // Compute status display text
-          let statusText = 'never scraped';
+          // Format price & stock or "never scraped"
+          const hasPrice = price !== null && price !== undefined && Number(price) > 0;
+          const priceDisplay = hasPrice ? formatPrice(price) : '—';
+          
+          let stockDisplay = 'never scraped';
+          let isOutOfStock = false;
+
+          if (stock !== null && stock !== undefined) {
+            stockDisplay = formatStock(stock);
+            if (Number(stock) === 0) isOutOfStock = true;
+          } else if (outcome === 'failed') {
+            stockDisplay = 'never scraped';
+          }
+
+          // Format status indicator
+          let statusText = 'scrape: idle';
           let statusClass = 'muted';
 
-          if (isScraping) {
-            statusText = 'scraping now…';
+          if (isRowScraping) {
+            statusText = 'scrape: running';
             statusClass = 'pill-running';
           } else if (outcome === 'failed') {
-            statusText = failureReason ? `failed: ${failureReason}` : 'scrape failed';
-            if (lastAttempt) statusText += ` (${relativeTime(lastAttempt)})`;
+            statusText = 'scrape: failed';
             statusClass = 'error-text';
           } else if (scrapedAt) {
             statusText = relativeTime(scrapedAt);
-            statusClass = '';
+            statusClass = 'muted';
           }
 
           return (
             <li key={id} className="tracked-row">
               <div className="tracked-info">
-                <Link to={`/product/${id}`} className="tracked-name">{name}</Link>
+                <Link to={`/product/${id}`} className="tracked-name" title={`View ${name} details`}>
+                  {name}
+                </Link>
                 <div className="tracked-meta">
                   {brand}{brand && category ? ' · ' : ''}{category}
                 </div>
               </div>
 
               <div className="tracked-price">
-                <div className="price-big">{formatPrice(price)}</div>
-                <div className="stock-small">{formatStock(stock)}</div>
+                <div className="price-big">{priceDisplay}</div>
+                <div className={`stock-small ${isOutOfStock ? 'stock-out' : ''}`}>
+                  {stockDisplay}
+                </div>
               </div>
 
-              <div className={`tracked-time ${statusClass}`} title={scrapedAt || lastAttempt || ''}>
+              <div className={`tracked-status ${statusClass}`} title={scrapedAt || lastAttempt || failureReason || ''}>
                 {statusText}
               </div>
 
-              <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+              <div className="tracked-actions">
                 <button
                   className="btn btn-secondary btn-sm"
-                  disabled={isScraping || busy === id}
-                  onClick={() => scrapeNow(id)}
-                  title="Run scraper now for this product"
+                  disabled={isRowScraping || busyUntrackId === id}
+                  onClick={() => handleScrapeNow(id)}
+                  title="Run live Playwright scraper for this product now"
                 >
-                  {isScraping ? 'Scraping…' : 'Scrape'}
+                  {isRowScraping ? 'Scraping…' : 'Scrape'}
                 </button>
                 <button
-                  className="btn btn-ghost btn-sm"
-                  disabled={busy === id || isScraping}
-                  onClick={() => untrack(id)}
-                  title="Stop tracking this product"
+                  className="btn-untrack"
+                  disabled={busyUntrackId === id || isRowScraping}
+                  onClick={() => handleUntrack(id)}
+                  title="Untrack this product"
+                  aria-label={`Untrack ${name}`}
                 >
-                  {busy === id ? '…' : '✕'}
+                  {busyUntrackId === id ? '…' : '✕'}
                 </button>
               </div>
             </li>
