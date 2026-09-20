@@ -1,13 +1,9 @@
 /**
  * api.js
  * --------------------------------------------------------------------------
- * Thin fetch wrapper used by every component. Keeps the API surface in one
- * file so reviewers can see exactly what backend calls the frontend makes.
- *
- * BASE_URL resolution:
- *   - If VITE_BACKEND_URL is set (production), use it directly.
- *   - Otherwise use '' (relative path) so Vite's dev-server proxy kicks in.
+ * Fetch wrapper for frontend API calls.
  */
+
 const BASE_URL = import.meta.env.VITE_BACKEND_URL || '';
 
 async function httpGet(path) {
@@ -51,20 +47,23 @@ async function httpDelete(path) {
 }
 
 export const api = {
-  // Search INE's mock store catalog.
+  // Search INE's mock store catalog
   searchProducts: (q) => httpGet(`/api/search?q=${encodeURIComponent(q)}`),
 
-  // Tracked product CRUD.
+  // Tracked product CRUD
   listTracked: () => httpGet('/api/tracked-products'),
   trackProduct: (sourceProductId) =>
     httpPost('/api/tracked-products', { sourceProductId }),
   untrackProduct: (id) => httpDelete(`/api/tracked-products/${id}`),
   getTracked: (id) => httpGet(`/api/tracked-products/${id}`),
 
-  // Per-product history + logs.
+  // Immediate on-demand scrape for a product
+  scrapeProductNow: (id) => httpPost(`/api/tracked-products/${id}/scrape`),
+
+  // Per-product history + logs
   getHistory: (id) => httpGet(`/api/tracked-products/${id}/history`),
   getLogs: (id) => httpGet(`/api/tracked-products/${id}/logs`),
 
-  // Scrape-trigger status (debug — no secret needed).
+  // Scrape lock status
   getScrapeStatus: () => httpGet('/api/scrape-trigger/status'),
 };

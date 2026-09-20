@@ -2,20 +2,12 @@
  * store.js
  * --------------------------------------------------------------------------
  * Database abstraction layer for the INE Product Price Tracker.
- *
- * Designed for maximum reliability and simplicity:
- * - Uses Supabase (PostgreSQL) when valid credentials are set in .env.
- * - Falls back to a clean in-memory database during local development when
- *   Supabase credentials are not configured or offline.
- *
- * This ensures the application works immediately out-of-the-box for local
- * testing while supporting full Supabase persistence in production.
+ * Supports Supabase (Postgres) and an In-Memory fallback for local dev.
  */
 
 const { createClient } = require('@supabase/supabase-js');
 const config = require('../config');
 
-// Determine whether real Supabase configuration exists
 const isRealSupabase = Boolean(
   config.supabaseUrl &&
   config.supabaseServiceKey &&
@@ -29,21 +21,19 @@ if (isRealSupabase) {
     supabase = createClient(config.supabaseUrl, config.supabaseServiceKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
-    console.log('[db] Initialized Supabase client for URL:', config.supabaseUrl);
+    console.log('[db] Connected to Supabase client');
   } catch (err) {
-    console.warn('[db] Could not initialize Supabase, using local in-memory store:', err.message);
+    console.warn('[db] Supabase init failed, using local store:', err.message);
   }
 } else {
-  console.log('[db] Running with local in-memory database store (Supabase credentials not configured).');
+  console.log('[db] Running with local in-memory store (Supabase unconfigured)');
 }
 
-// -------------------------------------------------------------------------
-// In-Memory Fallback Database
-// -------------------------------------------------------------------------
+// Memory fallback store
 const memDb = {
-  products: [],      // Array of tracked_product objects
-  priceHistory: [],  // Array of price_history objects
-  scrapeLogs: [],    // Array of scrape_logs objects
+  products: [],
+  priceHistory: [],
+  scrapeLogs: [],
   lock: {
     is_running: false,
     started_at: null,
@@ -54,12 +44,8 @@ const memDb = {
   nextLogId: 1,
 };
 
-// -------------------------------------------------------------------------
-// Database Interface Methods
-// -------------------------------------------------------------------------
-
 /**
- * List all tracked products merged with their latest price and stock.
+ * List all tracked products merged with latest price, stock, and scrape status.
  */
 async function listTrackedProducts() {
   if (supabase) {
@@ -67,37 +53,76 @@ async function listTrackedProducts() {
       const { data, error } = await supabase
         .from('latest_price_per_product')
         .select('*');
-      if (!error && data) return data;
 
-      // Fallback query if view is missing
-      const { data: fallback, error: err2 } = await supabase
-        .from('tracked_products')
-        .select('*')
-        .order('added_at', { ascending: false });
-      if (!err2 && fallback) return fallback;
+      if (!error && data) {
+        const { data: logs } = await supabase
+          .from('scrape_logs')
+          .select('tracked_product_id, outcome, failure_reason, attempted_at')
+          .order('attempted_at', { ascending: false });
+
+        return data.map((prod) => {
+          const log = (logs || []).find(
+            (l) => String(l.tracked_product_id) === String(prod.tracked_product_id || prod.id)
+          );
+          const price = prod.latest_price ?? null;
+          const stock = prod.latest_stock ?? null;
+          const at = prod.latest_scraped_at ?? null;
+
+          return {
+            ...prod,
+            id: String(prod.tracked_product_id || prod.id),
+            tracked_product_id: String(prod.tracked_product_id || prod.id),
+            latest_price: price,
+            latest_stock: stock,
+            latest_scraped_at: at,
+            price,
+            stock_quantity: stock,
+            scraped_at: at,
+            latest_outcome: log ? log.outcome : null,
+            last_attempt_at: log ? log.attempted_at : null,
+            failure_reason: log ? log.failure_reason : null,
+          };
+        });
+      }
     } catch (err) {
-      console.warn('[db] Supabase query failed, using local store:', err.message);
+      console.warn('[db] Supabase list failed, using local store:', err.message);
     }
   }
 
   // Memory fallback
   return memDb.products.map((prod) => {
-    // Find latest price history entry
     const history = memDb.priceHistory
       .filter((h) => String(h.tracked_product_id) === String(prod.id))
       .sort((a, b) => new Date(b.scraped_at) - new Date(a.scraped_at))[0];
 
+    const latestLog = memDb.scrapeLogs
+      .filter((l) => String(l.tracked_product_id) === String(prod.id))
+      .sort((a, b) => new Date(b.attempted_at) - new Date(a.attempted_at))[0];
+
+    const price = history ? history.price : null;
+    const stock = history ? history.stock_quantity : null;
+    const at = history ? history.scraped_at : null;
+
     return {
       ...prod,
-      price: history ? history.price : null,
-      stock_quantity: history ? history.stock_quantity : null,
-      scraped_at: history ? history.scraped_at : null,
+      id: String(prod.id),
+      tracked_product_id: String(prod.id),
+      latest_price: price,
+      latest_stock: stock,
+      latest_scraped_at: at,
+      price,
+      stock_quantity: stock,
+      scraped_at: at,
+      latest_outcome: latestLog ? latestLog.outcome : null,
+      last_attempt_at: latestLog ? latestLog.attempted_at : null,
+      failure_reason: latestLog ? latestLog.failure_reason : null,
+      attempts_made: latestLog ? latestLog.attempts_made : null,
     };
   });
 }
 
 /**
- * Find a tracked product by source_product_id (INE mock store ID).
+ * Find tracked product by source_product_id.
  */
 async function findTrackedBySourceId(sourceProductId) {
   const sourceIdNum = Number(sourceProductId);
@@ -109,16 +134,13 @@ async function findTrackedBySourceId(sourceProductId) {
         .eq('source_product_id', sourceIdNum)
         .maybeSingle();
       if (data) return data;
-    } catch (err) {
-      // Fall through to memory store
-    }
+    } catch (err) {}
   }
-
   return memDb.products.find((p) => Number(p.source_product_id) === sourceIdNum) || null;
 }
 
 /**
- * Get a single tracked product by internal database ID.
+ * Get a single tracked product by ID with latest price and logs.
  */
 async function getTrackedProduct(id) {
   if (supabase) {
@@ -129,11 +151,8 @@ async function getTrackedProduct(id) {
         .eq('id', id)
         .maybeSingle();
       if (data) return data;
-    } catch (err) {
-      // Fall through to memory store
-    }
+    } catch (err) {}
   }
-
   return memDb.products.find((p) => String(p.id) === String(id)) || null;
 }
 
@@ -174,22 +193,14 @@ async function addTrackedProduct(detail) {
 }
 
 /**
- * Delete a product from tracked_products.
+ * Delete product from tracked_products.
  */
 async function deleteTrackedProduct(id) {
   if (supabase) {
     try {
-      const { error } = await supabase
-        .from('tracked_products')
-        .delete()
-        .eq('id', id);
-      if (!error) return true;
-    } catch (err) {
-      console.warn('[db] Supabase delete failed, using local store:', err.message);
-    }
+      await supabase.from('tracked_products').delete().eq('id', id);
+    } catch (err) {}
   }
-
-  // Memory fallback
   memDb.products = memDb.products.filter((p) => String(p.id) !== String(id));
   memDb.priceHistory = memDb.priceHistory.filter((h) => String(h.tracked_product_id) !== String(id));
   memDb.scrapeLogs = memDb.scrapeLogs.filter((l) => String(l.tracked_product_id) !== String(id));
@@ -209,12 +220,9 @@ async function getPriceHistory(trackedProductId, limit = 200) {
         .order('scraped_at', { ascending: true })
         .limit(limit);
       if (!error && data) return data;
-    } catch (err) {
-      // Fall through
-    }
+    } catch (err) {}
   }
 
-  // Memory fallback
   return memDb.priceHistory
     .filter((h) => String(h.tracked_product_id) === String(trackedProductId))
     .sort((a, b) => new Date(a.scraped_at) - new Date(b.scraped_at))
@@ -233,14 +241,10 @@ async function insertPriceHistory(trackedProductId, price, stockQuantity) {
 
   if (supabase) {
     try {
-      const { error } = await supabase.from('price_history').insert(row);
-      if (!error) return true;
-    } catch (err) {
-      console.warn('[db] Supabase price_history insert failed:', err.message);
-    }
+      await supabase.from('price_history').insert(row);
+    } catch (err) {}
   }
 
-  // Memory fallback
   memDb.priceHistory.push({
     id: String(memDb.nextHistoryId++),
     ...row,
@@ -262,12 +266,9 @@ async function getScrapeLogs(trackedProductId, limit = 200) {
         .order('attempted_at', { ascending: false })
         .limit(limit);
       if (!error && data) return data;
-    } catch (err) {
-      // Fall through
-    }
+    } catch (err) {}
   }
 
-  // Memory fallback
   return memDb.scrapeLogs
     .filter((l) => String(l.tracked_product_id) === String(trackedProductId))
     .sort((a, b) => new Date(b.attempted_at) - new Date(a.attempted_at))
@@ -275,13 +276,13 @@ async function getScrapeLogs(trackedProductId, limit = 200) {
 }
 
 /**
- * Insert a scrape log row (for success, retried, or failed).
+ * Insert a scrape log row.
  */
 async function insertScrapeLog(trackedProductId, logData) {
   const row = {
     tracked_product_id: trackedProductId,
     outcome: logData.outcome,
-    attempts_made: logData.attempts,
+    attempts_made: logData.attempts || 1,
     failure_reason: logData.failureReason || null,
     price_seen: logData.price ?? null,
     stock_seen: logData.stock ?? null,
@@ -289,14 +290,10 @@ async function insertScrapeLog(trackedProductId, logData) {
 
   if (supabase) {
     try {
-      const { error } = await supabase.from('scrape_logs').insert(row);
-      if (!error) return true;
-    } catch (err) {
-      console.warn('[db] Supabase scrape_logs insert failed:', err.message);
-    }
+      await supabase.from('scrape_logs').insert(row);
+    } catch (err) {}
   }
 
-  // Memory fallback
   memDb.scrapeLogs.push({
     id: String(memDb.nextLogId++),
     ...row,
@@ -306,20 +303,18 @@ async function insertScrapeLog(trackedProductId, logData) {
 }
 
 /**
- * Read current scrape lock status.
+ * Scrape lock management.
  */
 async function getLockStatus() {
   if (supabase) {
     try {
-      const { data, error } = await supabase
+      const { data } = await supabase
         .from('scrape_lock')
         .select('is_running, started_at, stale_after_minutes')
         .eq('id', 1)
         .maybeSingle();
-      if (!error && data) return data;
-    } catch (err) {
-      // Fall through
-    }
+      if (data) return data;
+    } catch (err) {}
   }
 
   return {
@@ -329,9 +324,6 @@ async function getLockStatus() {
   };
 }
 
-/**
- * Try to acquire scrape lock.
- */
 async function tryAcquireLock() {
   const status = await getLockStatus();
   const now = new Date();
@@ -350,7 +342,6 @@ async function tryAcquireLock() {
     return { acquired: true, reason: 'lock was free' };
   }
 
-  // Check if stale
   const startedAt = status.started_at ? new Date(status.started_at).getTime() : 0;
   const ageMin = (Date.now() - startedAt) / 60000;
   const staleLimit = status.stale_after_minutes || 15;
@@ -378,9 +369,6 @@ async function tryAcquireLock() {
   };
 }
 
-/**
- * Release scrape lock.
- */
 async function releaseLock() {
   if (supabase) {
     try {

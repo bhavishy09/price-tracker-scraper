@@ -1,13 +1,11 @@
 /**
  * ProductDetail.jsx
- * Per-product page. Shows:
- *   - the tracked product's metadata (name, brand, category, sku)
- *   - latest known price + stock
- *   - a price + stock-over-time chart
- *   - the full scrape log table (failures included, never hidden)
- *
- * Polls its own data every 30s so a viewer can watch the latest scrape
- * come in (and watch failures show up honestly) without manual refresh.
+ * --------------------------------------------------------------------------
+ * Per-product detail view:
+ *   - Metadata (name, brand, category, SKU)
+ *   - Latest price + stock + on-demand scrape button
+ *   - Price + stock-over-time chart
+ *   - Honest scrape log table (failures included, never hidden)
  */
 
 import React, { useEffect, useState, useCallback } from 'react';
@@ -23,6 +21,7 @@ export default function ProductDetail() {
   const [history, setHistory] = useState(null);
   const [logs, setLogs] = useState(null);
   const [error, setError] = useState(null);
+  const [scraping, setScraping] = useState(false);
 
   const loadAll = useCallback(async () => {
     try {
@@ -42,15 +41,39 @@ export default function ProductDetail() {
 
   useEffect(() => {
     loadAll();
-    // Poll every 30s — cheap and lets a viewer see new scrapes land live.
-    const t = setInterval(loadAll, 30_000);
+    const t = setInterval(loadAll, 15000);
     return () => clearInterval(t);
   }, [loadAll]);
+
+  const handleScrapeNow = async () => {
+    setScraping(true);
+    try {
+      await api.scrapeProductNow(id);
+      await loadAll();
+    } catch (err) {
+      alert(`Scrape failed: ${err.message}`);
+    } finally {
+      setScraping(false);
+    }
+  };
 
   if (error) return <div className="card"><p className="error-text">{error}</p></div>;
   if (!tracked) return <div className="card"><p className="muted">Loading…</p></div>;
 
   const latestHist = history && history.length > 0 ? history[history.length - 1] : null;
+  const latestLog = logs && logs.length > 0 ? logs[0] : null;
+
+  // Determine stock text and status
+  let stockText = 'no scrape yet';
+  let statusSubtext = '';
+
+  if (latestHist) {
+    stockText = formatStock(latestHist.stock_quantity);
+    statusSubtext = `last scraped ${relativeTime(latestHist.scraped_at)}`;
+  } else if (latestLog && latestLog.outcome === 'failed') {
+    stockText = `Failed: ${latestLog.failure_reason || 'attempt failed'}`;
+    statusSubtext = `attempted ${relativeTime(latestLog.attempted_at)}`;
+  }
 
   return (
     <div className="product-detail">
@@ -68,16 +91,27 @@ export default function ProductDetail() {
             INE source id #{tracked.source_product_id} · tracked since {formatDateTime(tracked.added_at)}
           </div>
         </div>
+
         <div className="product-head-price">
           <div className="price-big">
             {latestHist ? formatPrice(latestHist.price) : '—'}
           </div>
-          <div className="stock-small">
-            {latestHist ? formatStock(latestHist.stock_quantity) : 'no scrape yet'}
+          <div className={`stock-small ${latestLog && latestLog.outcome === 'failed' && !latestHist ? 'error-text' : ''}`}>
+            {stockText}
           </div>
-          <div className="muted small">
-            {latestHist ? `last scraped ${relativeTime(latestHist.scraped_at)}` : ''}
-          </div>
+          {statusSubtext && (
+            <div className="muted small">
+              {statusSubtext}
+            </div>
+          )}
+          <button
+            className="btn btn-secondary btn-sm"
+            style={{ marginTop: '8px' }}
+            disabled={scraping}
+            onClick={handleScrapeNow}
+          >
+            {scraping ? 'Scraping live…' : 'Scrape now'}
+          </button>
         </div>
       </section>
 
