@@ -15,8 +15,7 @@ set -euo pipefail
 echo "[render-build] installing npm dependencies"
 npm ci --omit=dev || npm install
 
-echo "[render-build] installing Playwright Chromium + OS deps"
-# --with-deps installs the apt packages Chromium links against.
-npx playwright install --with-deps chromium
+echo "[render-build] installing Playwright Chromium"
+npx playwright install chromium
 
 echo "[render-build] done."
