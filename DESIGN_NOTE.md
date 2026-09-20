@@ -288,6 +288,63 @@ This is the difference between "wait for the content to load" and
 earliest possible moment". You still need to wait for the operation to
 actually complete before you can validate its result.
 
+### 3.6 The Character-Split Carrier Bug: Why products initially parsed as ₹1
+
+**The mistake / symptom.** In earlier test runs, all tracked products showed
+prices like `₹1` (or `₹2` / `₹3`) on the dashboard, despite the store page
+clearly displaying prices like `₹16,244`, `₹22,654`, or `₹1,09,900`.
+
+**The root cause.** An inspection of the mock store's frontend bundle
+(`index-B9UiQq4X.js`) revealed that the mock store employs dynamic carrier
+obfuscation: `priceCarrier === "split"`. It slices the formatted price string
+into individual single-character `<span>` elements separated by zero-width
+spaces (`\u200b`):
+
+```html
+<div class="pv-k2" style="font-size: 2.4rem; ...">
+  <span>₹​</span>
+  <span>1​</span>
+  <span>6​</span>
+  <span>,​</span>
+  <span>2​</span>
+  <span>4​</span>
+  <span>4</span>
+</div>
+```
+
+The initial scraper traversed `main.querySelectorAll('span')` and selected
+the first visible, non-strikethrough span that matched `/\d/`. With the split
+carrier, the first matching span was literally `<span>1​</span>`. The parser
+extracted `"1\u200b"`, stripped non-digits, and converted it to integer `1`.
+
+Additionally, the mock store randomizes between 6 different number formatters:
+1. `unicode`: Fullwidth Unicode characters (`１, ２, ３...`, Unicode range 65296+).
+2. `euro`: European notation with dots and comma decimals (`16.244,00`).
+3. `spaced`: Space-separated thousands (`16 244`).
+4. `trailing`: Appends `/- (incl. of all taxes)`.
+5. `nbsp`: Zero-width and non-breaking space delimiters.
+6. `lakh`: `Rs. 16,244.00`.
+
+**The fix.**
+1. **Container targeting**: Rather than matching individual `span` tags, the
+   scraper now identifies the primary price container (`style*="2.4rem"` or
+   `pv-*` class) and reads its complete `textContent`, gathering all child
+   spans together.
+2. **Unicode NFKC normalization**: `rawText.normalize('NFKC')` normalizes
+   fullwidth digits (`１２３` → `123`) and non-breaking spaces.
+3. **Format stripping**: Zero-width spaces (`\u200b`), trailing tax text
+   (`/- (incl. of all taxes)`), and trailing decimals (`,00` / `.00`) are
+   stripped before digit extraction.
+4. **Strict validation guard**: Reject any price `< 10`. Any accidental
+   single-digit parse is immediately rejected, triggering outer retry.
+5. **Database cleanup**: Any legacy `price_history` rows where `price < 10`
+   are automatically purged, and `store.js` enforces a guard preventing
+   storing prices `< 10`.
+
+**Lesson.** Anti-scraping obfuscation doesn't just hide elements with CSS;
+it actively fragments text across DOM trees. Always inspect the parent container's
+full text content and normalize Unicode character encodings.
+
 ---
 
 ## 4. What I would do differently with more time
