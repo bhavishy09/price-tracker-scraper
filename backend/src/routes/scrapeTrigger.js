@@ -118,7 +118,7 @@ router.post('/', requireCronSecret, async (_req, res) => {
       await db.insertScrapeLog(product.id, result);
       if (result.outcome === 'success' || result.outcome === 'retried') {
         const histRes = await db.insertPriceHistory(product.id, result.price, result.stock);
-        if (histRes && histRes.alert && (histRes.alert.isPriceDrop || histRes.alert.isBackInStock)) {
+        if (histRes && histRes.alert && (histRes.alert.isPriceDrop || histRes.alert.isPriceIncrease || histRes.alert.isBackInStock)) {
           sendPriceDropOrStockAlert(product, histRes.alert).catch(() => {});
         }
       }

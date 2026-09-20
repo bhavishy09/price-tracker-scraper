@@ -17,7 +17,7 @@ const https = require('https');
  * Send an email alert if price dropped or item returned to stock.
  */
 async function sendPriceDropOrStockAlert(product, alertData) {
-  if (!alertData || (!alertData.isPriceDrop && !alertData.isBackInStock)) {
+  if (!alertData || (!alertData.isPriceDrop && !alertData.isPriceIncrease && !alertData.isBackInStock)) {
     return { sent: false, reason: 'no alert condition met' };
   }
 
@@ -31,6 +31,8 @@ async function sendPriceDropOrStockAlert(product, alertData) {
       ? 'Price Drop & Back-in-Stock'
       : alertData.isPriceDrop
       ? 'Price Drop'
+      : alertData.isPriceIncrease
+      ? 'Price Increase'
       : 'Back-in-Stock';
 
     console.log(`[alerts] ${triggerType} detected for "${product.name}" (price: ₹${alertData.newPrice}, stock: ${alertData.newStock}). SendGrid unconfigured (SENDGRID_API_KEY / ALERT_EMAIL not set), skipping email dispatch.`);
@@ -53,6 +55,14 @@ async function sendPriceDropOrStockAlert(product, alertData) {
         `New Price: ₹${alertData.newPrice.toLocaleString('en-IN')}\n` +
         `Previous Price: ₹${alertData.prevPrice.toLocaleString('en-IN')}\n` +
         `You Save: ₹${alertData.priceChange.toLocaleString('en-IN')}\n` +
+        `Current Stock: ${alertData.newStock} units\n`;
+    } else if (alertData.isPriceIncrease) {
+      subject = `[INE Alert] Price Increased: ${product.name} (Now ₹${alertData.newPrice.toLocaleString('en-IN')})`;
+      messageBody += `Price Increase Notice!\n\n` +
+        `Product: ${product.name} (${product.brand || ''} ${product.category || ''})\n` +
+        `New Price: ₹${alertData.newPrice.toLocaleString('en-IN')}\n` +
+        `Previous Price: ₹${alertData.prevPrice.toLocaleString('en-IN')}\n` +
+        `Increased By: +₹${alertData.priceChange.toLocaleString('en-IN')}\n` +
         `Current Stock: ${alertData.newStock} units\n`;
     } else if (alertData.isBackInStock) {
       subject = `[INE Alert] Back in Stock: ${product.name} (${alertData.newStock} available)`;

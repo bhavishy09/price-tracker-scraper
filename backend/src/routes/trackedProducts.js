@@ -30,7 +30,7 @@ async function triggerBackgroundScrape(product) {
     await db.insertScrapeLog(product.id, result);
     if (result.outcome === 'success' || result.outcome === 'retried') {
       const histRes = await db.insertPriceHistory(product.id, result.price, result.stock);
-      if (histRes && histRes.alert && (histRes.alert.isPriceDrop || histRes.alert.isBackInStock)) {
+      if (histRes && histRes.alert && (histRes.alert.isPriceDrop || histRes.alert.isPriceIncrease || histRes.alert.isBackInStock)) {
         sendPriceDropOrStockAlert(product, histRes.alert).catch(() => {});
       }
     }
@@ -177,7 +177,7 @@ router.post('/:id/scrape', async (req, res) => {
     let alertInfo = null;
     if (result.outcome === 'success' || result.outcome === 'retried') {
       const histRes = await db.insertPriceHistory(product.id, result.price, result.stock);
-      if (histRes && histRes.alert && (histRes.alert.isPriceDrop || histRes.alert.isBackInStock)) {
+      if (histRes && histRes.alert && (histRes.alert.isPriceDrop || histRes.alert.isPriceIncrease || histRes.alert.isBackInStock)) {
         alertInfo = histRes.alert;
         sendPriceDropOrStockAlert(product, histRes.alert).catch(() => {});
       }
