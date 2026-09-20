@@ -34,6 +34,7 @@ const memDb = {
   products: [],
   priceHistory: [],
   scrapeLogs: [],
+  notifications: [],
   lock: {
     is_running: false,
     started_at: null,
@@ -42,6 +43,7 @@ const memDb = {
   nextProductId: 1,
   nextHistoryId: 1,
   nextLogId: 1,
+  nextNotificationId: 1,
 };
 
 /**
@@ -171,7 +173,7 @@ async function getTrackedProduct(id) {
       if (data) return data;
     } catch (err) {}
   }
-  return memDb.products.find((p) => String(p.id) === String(id)) || null;
+  return memDb.products.find((p) => String(p.id) === String(id) || String(p.source_product_id) === String(id)) || null;
 }
 
 /**
@@ -336,16 +338,61 @@ async function insertPriceHistory(trackedProductId, price, stockQuantity) {
   if (!prevRow) {
     const memRows = memDb.priceHistory
       .filter((h) => String(h.tracked_product_id) === String(trackedProductId))
-      .sort((a, b) => new Date(b.scraped_at) - new Date(a.scraped_at));
+      .sort((a, b) => new Date(b.scraped_at) - new Date(a.scraped_at) || Number(b.id) - Number(a.id));
     if (memRows.length > 0) prevRow = memRows[0];
   }
 
   const prevPrice = prevRow ? Number(prevRow.price) : null;
   const prevStock = prevRow ? Number(prevRow.stock_quantity) : null;
 
-  const isPriceDrop = Boolean(prevPrice !== null && Number.isFinite(prevPrice) && numPrice < prevPrice);
-  const priceChange = isPriceDrop ? Number((prevPrice - numPrice).toFixed(2)) : 0;
-  const isBackInStock = Boolean(prevStock !== null && prevStock === 0 && numStock > 0);
+  let isPriceDrop = false;
+  let isPriceIncrease = false;
+  let priceChange = 0;
+  let isBackInStock = false;
+
+  // Requirement 5: Only trigger on 2nd and later scrapes (when prevPrice exists)
+  // Requirement 3: No price change at all generates NO notification
+  if (prevPrice !== null && Number.isFinite(prevPrice)) {
+    if (numPrice < prevPrice) {
+      isPriceDrop = true;
+      priceChange = Number((prevPrice - numPrice).toFixed(2));
+      const prod = await getTrackedProduct(trackedProductId);
+      const prodName = prod ? prod.name : `Product #${trackedProductId}`;
+      await createNotification({
+        tracked_product_id: trackedProductId,
+        type: 'price_drop',
+        message: `Price dropped for ${prodName} from ₹${prevPrice} to ₹${numPrice}!`,
+        previous_price: prevPrice,
+        new_price: numPrice,
+      }).catch(() => {});
+    } else if (numPrice > prevPrice) {
+      isPriceIncrease = true;
+      priceChange = Number((numPrice - prevPrice).toFixed(2));
+      const prod = await getTrackedProduct(trackedProductId);
+      const prodName = prod ? prod.name : `Product #${trackedProductId}`;
+      await createNotification({
+        tracked_product_id: trackedProductId,
+        type: 'price_increase',
+        message: `Price increased for ${prodName} from ₹${prevPrice} to ₹${numPrice}!`,
+        previous_price: prevPrice,
+        new_price: numPrice,
+      }).catch(() => {});
+    }
+  }
+
+  // Requirement 6: Back-in-stock alert coexists cleanly without interference
+  if (prevStock !== null && prevStock === 0 && numStock > 0) {
+    isBackInStock = true;
+    const prod = await getTrackedProduct(trackedProductId);
+    const prodName = prod ? prod.name : `Product #${trackedProductId}`;
+    await createNotification({
+      tracked_product_id: trackedProductId,
+      type: 'back_in_stock',
+      message: `${prodName} is back in stock with ${numStock} units!`,
+      previous_price: prevPrice,
+      new_price: numPrice,
+    }).catch(() => {});
+  }
 
   const row = {
     tracked_product_id: trackedProductId,
@@ -374,6 +421,7 @@ async function insertPriceHistory(trackedProductId, price, stockQuantity) {
     ok: true,
     alert: {
       isPriceDrop,
+      isPriceIncrease,
       isBackInStock,
       priceChange,
       prevPrice,
@@ -543,6 +591,100 @@ async function releaseLock() {
   memDb.lock.started_at = null;
 }
 
+/**
+ * Notification management helpers
+ */
+async function createNotification({ tracked_product_id, type, message, previous_price, new_price }) {
+  const item = {
+    tracked_product_id: tracked_product_id ? String(tracked_product_id) : null,
+    type,
+    message,
+    previous_price: previous_price != null ? Number(previous_price) : null,
+    new_price: new_price != null ? Number(new_price) : null,
+    is_dismissed: false,
+  };
+
+  if (supabase) {
+    try {
+      const { data, error } = await supabase
+        .from('notifications')
+        .insert(item)
+        .select()
+        .single();
+      if (!error && data) return data;
+    } catch (err) {
+      console.warn('[db] Supabase createNotification failed:', err.message);
+    }
+  }
+
+  const newNotif = {
+    id: String(memDb.nextNotificationId++),
+    ...item,
+    created_at: new Date().toISOString(),
+  };
+  memDb.notifications.unshift(newNotif);
+  return newNotif;
+}
+
+async function listNotifications(limit = 50) {
+  if (supabase) {
+    try {
+      const { data, error } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('is_dismissed', false)
+        .order('created_at', { ascending: false })
+        .limit(limit);
+      if (!error && data) return data;
+    } catch (err) {
+      console.warn('[db] Supabase listNotifications failed:', err.message);
+    }
+  }
+
+  return memDb.notifications
+    .filter((n) => !n.is_dismissed)
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+    .slice(0, limit);
+}
+
+async function dismissNotification(id) {
+  if (supabase) {
+    try {
+      await supabase
+        .from('notifications')
+        .update({ is_dismissed: true })
+        .eq('id', id);
+    } catch (err) {
+      console.warn('[db] Supabase dismissNotification failed:', err.message);
+    }
+  }
+
+  const item = memDb.notifications.find((n) => String(n.id) === String(id));
+  if (item) {
+    item.is_dismissed = true;
+    return true;
+  }
+  return false;
+}
+
+async function dismissAllNotifications() {
+  if (supabase) {
+    try {
+      await supabase
+        .from('notifications')
+        .update({ is_dismissed: true })
+        .eq('is_dismissed', false);
+    } catch (err) {
+      console.warn('[db] Supabase dismissAllNotifications failed:', err.message);
+    }
+  }
+
+  memDb.notifications.forEach((n) => {
+    n.is_dismissed = true;
+  });
+  return true;
+}
+
 module.exports = {
   listTrackedProducts,
   findTrackedBySourceId,
@@ -559,4 +701,8 @@ module.exports = {
   tryAcquireLock,
   releaseLock,
   purgeInvalidPriceHistory,
+  createNotification,
+  listNotifications,
+  dismissNotification,
+  dismissAllNotifications,
 };

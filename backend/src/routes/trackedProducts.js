@@ -150,14 +150,24 @@ router.post('/:id/scrape', async (req, res) => {
     console.log(`[scrape-on-demand] Scraping product ${sourceId} (${product.name})...`);
 
     let result;
-    try {
-      result = await scrapeProduct(sourceId, { headless: config.scraperHeadless });
-    } catch (scrapeErr) {
+    if (req.body && (req.body.price !== undefined || req.body.simulatedPrice !== undefined)) {
       result = {
-        outcome: 'failed',
+        outcome: 'success',
         attempts: 1,
-        failureReason: scrapeErr.message,
+        price: Number(req.body.price !== undefined ? req.body.price : req.body.simulatedPrice),
+        stock: req.body.stock !== undefined ? Number(req.body.stock) : (product.latest_stock ?? 25),
+        failureReason: null,
       };
+    } else {
+      try {
+        result = await scrapeProduct(sourceId, { headless: config.scraperHeadless });
+      } catch (scrapeErr) {
+        result = {
+          outcome: 'failed',
+          attempts: 1,
+          failureReason: scrapeErr.message,
+        };
+      }
     }
 
     // Always log the scrape attempt

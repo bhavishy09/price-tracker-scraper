@@ -25,6 +25,7 @@ const config = require('./config');
 const searchRouter = require('./routes/search');
 const trackedProductsRouter = require('./routes/trackedProducts');
 const scrapeTriggerRouter = require('./routes/scrapeTrigger');
+const notificationsRouter = require('./routes/notifications');
 
 const app = express();
 
@@ -60,6 +61,7 @@ app.get('/api/health', (_req, res) => {
 app.use('/api/search', searchRouter);
 app.use('/api/tracked-products', trackedProductsRouter);
 app.use('/api/scrape-trigger', scrapeTriggerRouter);
+app.use('/api/notifications', notificationsRouter);
 
 // 404 for unknown /api/* routes.
 app.use('/api/*', (req, res) => {

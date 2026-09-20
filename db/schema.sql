@@ -107,3 +107,22 @@ select distinct on (tp.id)
 from tracked_products tp
 left join price_history ph on ph.tracked_product_id = tp.id
 order by tp.id, ph.scraped_at desc nulls last;
+
+-- -------------------------------------------------------------------------
+-- notifications
+--   In-app alerts for price drops, price increases, and back-in-stock events.
+-- -------------------------------------------------------------------------
+create table if not exists notifications (
+    id                  bigserial primary key,
+    tracked_product_id  bigint not null references tracked_products(id) on delete cascade,
+    type                text not null check (type in ('price_drop', 'price_increase', 'back_in_stock')),
+    message             text not null,
+    previous_price      numeric(10, 2),
+    new_price           numeric(10, 2),
+    is_dismissed        boolean not null default false,
+    created_at          timestamptz not null default now()
+);
+
+create index if not exists idx_notifications_active
+    on notifications (is_dismissed, created_at desc);
+
