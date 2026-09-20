@@ -248,6 +248,13 @@ export default function TrackedProductsList({ refreshKey }) {
                   >
                     {isRowScraping ? 'Scraping…' : 'Scrape'}
                   </button>
+                  <Link
+                    to={`/product/${id}`}
+                    className="btn btn-secondary btn-sm"
+                    title={`View full scrape logs and price history for ${name}`}
+                  >
+                    See logs
+                  </Link>
                   <button
                     className="btn-untrack"
                     disabled={busyUntrackId === id || isRowScraping}

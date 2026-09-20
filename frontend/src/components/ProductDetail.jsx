@@ -46,6 +46,15 @@ export default function ProductDetail() {
     return () => clearInterval(timer);
   }, [loadAll]);
 
+  useEffect(() => {
+    if (logs && (window.location.hash === '#logs' || window.location.hash === '#scrape-logs')) {
+      const el = document.getElementById('scrape-logs');
+      if (el) {
+        setTimeout(() => el.scrollIntoView({ behavior: 'smooth' }), 100);
+      }
+    }
+  }, [logs]);
+
   const handleScrapeNow = async () => {
     setScraping(true);
     try {
@@ -205,7 +214,7 @@ export default function ProductDetail() {
         <PriceChart history={history} />
       </section>
 
-      <section className="card">
+      <section className="card" id="scrape-logs">
         <div className="card-title-group" style={{ marginBottom: '14px' }}>
           <h2>Scrape log (Honest transparency)</h2>
           <p className="muted small">
