@@ -114,7 +114,7 @@ order by tp.id, ph.scraped_at desc nulls last;
 -- -------------------------------------------------------------------------
 create table if not exists notifications (
     id                  bigserial primary key,
-    tracked_product_id  bigint not null references tracked_products(id) on delete cascade,
+    tracked_product_id  uuid not null references tracked_products(id) on delete cascade,
     type                text not null check (type in ('price_drop', 'price_increase', 'back_in_stock')),
     message             text not null,
     previous_price      numeric(10, 2),
