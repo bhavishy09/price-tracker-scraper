@@ -155,6 +155,7 @@ export default function PriceChart({ history }) {
                 <th>Scraped at</th>
                 <th>Price (INR)</th>
                 <th>Stock quantity</th>
+                <th>Alert Event</th>
               </tr>
             </thead>
             <tbody>
@@ -163,6 +164,19 @@ export default function PriceChart({ history }) {
                   <td>{formatDateTime(h.scraped_at)}</td>
                   <td style={{ fontWeight: 600 }}>{formatPrice(h.price)}</td>
                   <td>{formatStock(h.stock_quantity)}</td>
+                  <td>
+                    {h.is_price_drop && (
+                      <span className="alert-badge alert-badge-drop" style={{ marginRight: '4px' }}>
+                        ▼ -{formatPrice(Math.abs(h.price_change || 0))}
+                      </span>
+                    )}
+                    {h.is_back_in_stock && (
+                      <span className="alert-badge alert-badge-stock">
+                        ● Back in stock
+                      </span>
+                    )}
+                    {!h.is_price_drop && !h.is_back_in_stock && <span className="muted">—</span>}
+                  </td>
                 </tr>
               ))}
             </tbody>

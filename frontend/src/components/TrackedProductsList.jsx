@@ -22,6 +22,7 @@ export default function TrackedProductsList({ refreshKey }) {
   const [error, setError] = useState(null);
   const [busyUntrackId, setBusyUntrackId] = useState(null);
   const [scrapingId, setScrapingId] = useState(null);
+  const [updatingIntervalId, setUpdatingIntervalId] = useState(null);
   const [globalStatus, setGlobalStatus] = useState({ is_running: false });
 
   const loadData = useCallback(async () => {
@@ -67,6 +68,24 @@ export default function TrackedProductsList({ refreshKey }) {
       setScrapingId(null);
     }
   }, [loadData]);
+
+  const handleIntervalChange = useCallback(async (id, minutes) => {
+    setUpdatingIntervalId(id);
+    try {
+      await api.updateTracked(id, { scrape_interval_minutes: minutes });
+      setItems((prev) =>
+        (prev || []).map((p) =>
+          (p.tracked_product_id || p.id) === id
+            ? { ...p, scrape_interval_minutes: minutes }
+            : p
+        )
+      );
+    } catch (err) {
+      alert(`Failed to update interval: ${err.message}`);
+    } finally {
+      setUpdatingIntervalId(null);
+    }
+  }, []);
 
   if (error) {
     return (
@@ -167,44 +186,78 @@ export default function TrackedProductsList({ refreshKey }) {
 
           return (
             <li key={id} className="tracked-row">
-              <div className="tracked-info">
-                <Link to={`/product/${id}`} className="tracked-name" title={`View ${name} details`}>
-                  {name}
-                </Link>
-                <div className="tracked-meta">
-                  {brand}{brand && category ? ' · ' : ''}{category}
+              <div className="tracked-row-main">
+                <div className="tracked-info">
+                  <Link to={`/product/${id}`} className="tracked-name" title={`View ${name} details`}>
+                    {name}
+                  </Link>
+                  <div className="tracked-meta">
+                    {brand}{brand && category ? ' · ' : ''}{category}
+                  </div>
+                  {(p.is_price_drop || p.is_back_in_stock) && (
+                    <div className="alert-badges-row">
+                      {p.is_price_drop && (
+                        <span
+                          className="alert-badge alert-badge-drop"
+                          title={p.price_change ? `Price dropped by ${formatPrice(Math.abs(p.price_change))}` : 'Price dropped!'}
+                        >
+                          ▼ Price drop {p.price_change ? `(-${formatPrice(Math.abs(p.price_change))})` : ''}
+                        </span>
+                      )}
+                      {p.is_back_in_stock && (
+                        <span className="alert-badge alert-badge-stock" title="Product is back in stock!">
+                          ● Back in stock
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="tracked-price">
+                  <div className="price-big">{priceDisplay}</div>
+                  <div className={`stock-small ${isOutOfStock ? 'stock-out' : ''}`}>
+                    {stockDisplay}
+                  </div>
                 </div>
               </div>
 
-              <div className="tracked-price">
-                <div className="price-big">{priceDisplay}</div>
-                <div className={`stock-small ${isOutOfStock ? 'stock-out' : ''}`}>
-                  {stockDisplay}
+              <div className="tracked-row-footer">
+                <div className={`tracked-status ${statusClass}`} title={scrapedAt || lastAttempt || failureReason || ''}>
+                  {statusText}
                 </div>
-              </div>
 
-              <div className={`tracked-status ${statusClass}`} title={scrapedAt || lastAttempt || failureReason || ''}>
-                {statusText}
-              </div>
-
-              <div className="tracked-actions">
-                <button
-                  className="btn btn-secondary btn-sm"
-                  disabled={isRowScraping || busyUntrackId === id}
-                  onClick={() => handleScrapeNow(id)}
-                  title="Run live Playwright scraper for this product now"
-                >
-                  {isRowScraping ? 'Scraping…' : 'Scrape'}
-                </button>
-                <button
-                  className="btn-untrack"
-                  disabled={busyUntrackId === id || isRowScraping}
-                  onClick={() => handleUntrack(id)}
-                  title="Untrack this product"
-                  aria-label={`Untrack ${name}`}
-                >
-                  {busyUntrackId === id ? '…' : '✕'}
-                </button>
+                <div className="tracked-actions">
+                  <select
+                    className="interval-select"
+                    value={p.scrape_interval_minutes || 120}
+                    disabled={updatingIntervalId === id || isRowScraping}
+                    onChange={(e) => handleIntervalChange(id, Number(e.target.value))}
+                    title="Configurable scrape frequency"
+                    aria-label={`Scrape frequency for ${name}`}
+                  >
+                    <option value={30}>Every 30m</option>
+                    <option value={60}>Every 1h</option>
+                    <option value={120}>Every 2h</option>
+                    <option value={360}>Every 6h</option>
+                  </select>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    disabled={isRowScraping || busyUntrackId === id}
+                    onClick={() => handleScrapeNow(id)}
+                    title="Run live Playwright scraper for this product now"
+                  >
+                    {isRowScraping ? 'Scraping…' : 'Scrape'}
+                  </button>
+                  <button
+                    className="btn-untrack"
+                    disabled={busyUntrackId === id || isRowScraping}
+                    onClick={() => handleUntrack(id)}
+                    title="Untrack this product"
+                    aria-label={`Untrack ${name}`}
+                  >
+                    {busyUntrackId === id ? '…' : '✕'}
+                  </button>
+                </div>
               </div>
             </li>
           );

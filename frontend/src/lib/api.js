@@ -34,6 +34,22 @@ async function httpPost(path, payload) {
   return body;
 }
 
+async function httpPatch(path, payload) {
+  const res = await fetch(BASE_URL + path, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(payload || {}),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(body.error || `HTTP ${res.status}`);
+    err.status = res.status;
+    err.body = body;
+    throw err;
+  }
+  return body;
+}
+
 async function httpDelete(path) {
   const res = await fetch(BASE_URL + path, { method: 'DELETE' });
   const body = await res.json().catch(() => ({}));
@@ -54,6 +70,7 @@ export const api = {
   listTracked: () => httpGet('/api/tracked-products'),
   trackProduct: (sourceProductId) =>
     httpPost('/api/tracked-products', { sourceProductId }),
+  updateTracked: (id, updates) => httpPatch(`/api/tracked-products/${id}`, updates),
   untrackProduct: (id) => httpDelete(`/api/tracked-products/${id}`),
   getTracked: (id) => httpGet(`/api/tracked-products/${id}`),
 

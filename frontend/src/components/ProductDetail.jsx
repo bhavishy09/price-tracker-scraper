@@ -22,6 +22,7 @@ export default function ProductDetail() {
   const [logs, setLogs] = useState(null);
   const [error, setError] = useState(null);
   const [scraping, setScraping] = useState(false);
+  const [updatingInterval, setUpdatingInterval] = useState(false);
 
   const loadAll = useCallback(async () => {
     try {
@@ -54,6 +55,18 @@ export default function ProductDetail() {
       alert(`Scrape failed: ${err.message}`);
     } finally {
       setScraping(false);
+    }
+  };
+
+  const handleIntervalChange = async (minutes) => {
+    setUpdatingInterval(true);
+    try {
+      await api.updateTracked(id, { scrape_interval_minutes: minutes });
+      setTracked((prev) => ({ ...prev, scrape_interval_minutes: minutes }));
+    } catch (err) {
+      alert(`Failed to update interval: ${err.message}`);
+    } finally {
+      setUpdatingInterval(false);
     }
   };
 
@@ -90,6 +103,13 @@ export default function ProductDetail() {
   let isOutOfStock = false;
   let statusSubtext = '';
 
+  const latestDrop = (history || []).slice().reverse().find((h) => h.is_price_drop);
+  const isPriceDropActive = Boolean(latestHist?.is_price_drop || (latestDrop && latestHist && Number(latestHist.price) <= Number(latestDrop.price)));
+  const activeDropChange = latestHist?.is_price_drop ? latestHist.price_change : (latestDrop?.price_change || 0);
+
+  const latestStockAlert = (history || []).slice().reverse().find((h) => h.is_back_in_stock);
+  const isBackInStockActive = Boolean(latestHist?.is_back_in_stock || (latestStockAlert && latestHist && Number(latestHist.stock_quantity) > 0));
+
   if (latestHist) {
     stockText = formatStock(latestHist.stock_quantity);
     if (Number(latestHist.stock_quantity) === 0) isOutOfStock = true;
@@ -113,6 +133,41 @@ export default function ProductDetail() {
           </div>
           <div className="product-meta-fine">
             INE catalog source #{tracked.source_product_id} · Tracked since {formatDateTime(tracked.added_at)}
+          </div>
+          
+          {(isPriceDropActive || isBackInStockActive) && (
+            <div className="alert-badges-row" style={{ marginTop: '8px' }}>
+              {isPriceDropActive && (
+                <span
+                  className="alert-badge alert-badge-drop"
+                  title={activeDropChange ? `Price dropped by ${formatPrice(Math.abs(activeDropChange))}` : 'Price dropped!'}
+                >
+                  ▼ Price drop {activeDropChange ? `(-${formatPrice(Math.abs(activeDropChange))})` : ''}
+                </span>
+              )}
+              {isBackInStockActive && (
+                <span className="alert-badge alert-badge-stock" title="Product is back in stock!">
+                  ● Back in stock
+                </span>
+              )}
+            </div>
+          )}
+
+          <div className="detail-interval-wrap">
+            <span>Scrape frequency:</span>
+            <select
+              className="interval-select"
+              value={tracked.scrape_interval_minutes || 120}
+              disabled={updatingInterval}
+              onChange={(e) => handleIntervalChange(Number(e.target.value))}
+              title="Configure automated scrape schedule for this product"
+            >
+              <option value={30}>Every 30 minutes</option>
+              <option value={60}>Every 1 hour</option>
+              <option value={120}>Every 2 hours (default)</option>
+              <option value={360}>Every 6 hours</option>
+            </select>
+            {updatingInterval && <span className="muted small">Saving…</span>}
           </div>
         </div>
 
