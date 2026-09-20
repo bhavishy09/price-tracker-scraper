@@ -23,7 +23,7 @@
  *      partial character reads) to guarantee honest, accurate pricing.
  */
 
-const { chromium } = require('playwright');
+const { launchChromium } = require('./browserHelper');
 
 // Constants & Retry Policy
 const MAX_OUTER_ATTEMPTS = 3;
@@ -52,7 +52,7 @@ async function scrapeProduct(productId, opts = {}) {
   }
 
   const ownBrowser = !opts.browser;
-  const browser = opts.browser ?? (await chromium.launch({ headless }));
+  const browser = opts.browser ?? (await launchChromium({ headless }));
   let lastFailureReason = 'unknown failure';
 
   try {

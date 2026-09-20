@@ -15,7 +15,8 @@ set -euo pipefail
 echo "[render-build] installing npm dependencies"
 npm ci --omit=dev || npm install
 
-echo "[render-build] installing Playwright Chromium"
+echo "[render-build] installing Playwright Chromium into project node_modules"
+export PLAYWRIGHT_BROWSERS_PATH=0
 npx playwright install chromium
 
 echo "[render-build] done."

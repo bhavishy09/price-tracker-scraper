@@ -6,7 +6,7 @@
  */
 
 const express = require('express');
-const { chromium } = require('playwright');
+const { launchChromium } = require('../scraper/browserHelper');
 
 const config = require('../config');
 const db = require('../db/store');
@@ -81,7 +81,7 @@ router.post('/', requireCronSecret, async (_req, res) => {
   const perProduct = [];
 
   try {
-    browser = await chromium.launch({ headless: config.scraperHeadless });
+    browser = await launchChromium({ headless: config.scraperHeadless });
 
     for (const product of products) {
       const sourceId = product.source_product_id || product.id;
