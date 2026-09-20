@@ -1,340 +1,187 @@
 # INE Product Price Tracker
 
-A full-stack app that tracks the price and stock of products on INE's hosted
-mock store (<https://demo.inelabteamdev.com>) by scraping it on a 2-hour
-schedule. The scraper is the heart of this project — see
-[`DESIGN_NOTE.md`](./DESIGN_NOTE.md) for the reliability approach.
+A robust full-stack application that monitors product prices and inventory on INE's intentionally challenging mock store ([demo.inelabteamdev.com](https://demo.inelabteamdev.com)). Built with an emphasis on scraper reliability, honest diagnostic observability, and resilience against real-world anti-bot techniques.
 
-Built for the INE Software Engineer Intern Assignment.
+Built for the **INE Software Engineer Intern Assignment**.
 
 ---
 
-## What it does
+## Live Deployments
 
-- **Search** the mock store by product name / brand / category / SKU.
-- **Track** a product with one click — its metadata is persisted to Supabase.
-- **Scrape on a schedule** — every 2 hours an external cron
-  (`cron-job.org`) hits a secret-protected endpoint on the backend. The
-  backend uses Playwright to drive a real Chromium browser that solves the
-  site's anti-bot challenge + interaction gate, then reads the rendered
-  price and stock off the DOM.
-- **View price history** — a per-product chart of price + stock over time.
-- **View scrape logs** — every attempt is recorded (success / retried /
-  failed), with the failure reason shown verbatim. Failures are never hidden.
-
-The scraper is reliable by construction: 3 outer attempts with backoff,
-generous fixed waits for late-loading content, validation before saving,
-and **never** writes null/zero/blank to `price_history` on failure.
+- **Frontend (Vercel)**: [https://price-tracker-scraper-ohswku54i-bhavishy2.vercel.app](https://price-tracker-scraper-ohswku54i-bhavishy2.vercel.app)
+- **Backend API (Render)**: [https://ine-price-tracker-backend-l401.onrender.com](https://ine-price-tracker-backend-l401.onrender.com)
+- **Target Mock Store**: [https://demo.inelabteamdev.com](https://demo.inelabteamdev.com)
 
 ---
 
-## Tech stack
+## Core Capabilities
 
-| Layer        | Choice                                   | Why                                            |
-| ------------ | ---------------------------------------- | ---------------------------------------------- |
-| Frontend     | React.js (Vite) on Vercel               | Fast to build; Vercel free tier is generous    |
-| Backend      | Node.js + Express on Render              | Lightweight, Playwright-friendly                |
-| Database     | Supabase (PostgreSQL)                    | Free managed Postgres with a usable dashboard  |
-| Search       | Plain `fetch()` to INE's catalog JSON API | Recon confirmed catalog is unprotected JSON    |
-| Price/stock  | Playwright (real Chromium)              | Price is behind a PoW challenge + interaction gate; cannot be done with fetch |
-| Scheduling   | External cron via `cron-job.org`        | Render free tier sleeps when idle               |
-
-See `DESIGN_NOTE.md` for the full evidence-based justification of
-fetch-vs-Playwright.
-
----
-
-## Repository layout
-
-```
-ine-tracker/
-├── db/
-│   └── schema.sql              # Supabase / Postgres schema (run once)
-├── backend/                    # Express + Playwright scraper
-│   ├── src/
-│   │   ├── server.js           # Express entry point
-│   │   ├── config.js           # Every env var in one place
-│   │   ├── db/supabase.js      # Supabase client singleton
-│   │   ├── services/
-│   │   │   ├── catalog.js      # Plain fetch() to INE's catalog API
-│   │   │   └── lock.js         # Scrape overlap lock
-│   │   ├── scraper/
-│   │   │   ├── scraper.js      # ★ THE CORE — Playwright scrape + retry
-│   │   │   └── run-scrape.js   # Standalone CLI for isolation testing
-│   │   └── routes/
-│   │       ├── search.js
-│   │       ├── trackedProducts.js
-│   │       └── scrapeTrigger.js
-│   ├── .env.example
-│   ├── render-build.sh         # Installs Playwright + OS deps on Render
-│   └── package.json
-├── frontend/                   # React (Vite)
-│   ├── src/
-│   │   ├── App.jsx
-│   │   ├── main.jsx
-│   │   ├── styles.css
-│   │   ├── lib/{api,format}.js
-│   │   └── components/         # One file per component, small + readable
-│   ├── vite.config.js
-│   ├── vercel.json
-│   ├── .env.example
-│   └── package.json
-├── DESIGN_NOTE.md              # Reliability approach, trade-offs, AI failures
-└── README.md                   # ← you are here
-```
+- **Search without Scraping Overhead**: Rapidly searches INE's catalog by product name, brand, or category using lightweight HTTP requests to the unprotected catalog JSON API.
+- **Resilient Playwright Scraping**: Price and stock are protected by client-side WebAssembly Proof-of-Work (PoW) challenges and a human interaction gate (requiring cursor movements and dwell time). The scraper uses real headless Chromium to solve these challenges reliably.
+- **Never Stores Corrupt Data**: If a scrape fails or times out, the failure is recorded verbatim in the `scrape_logs` table. `price_history` is **never** written with null, zero, or placeholder prices — the last known good price remains active.
+- **Scheduled & On-Demand Triggers**: Runs automatically every 2 hours via external cron (`cron-job.org`). Also supports manual "Scrape" triggers per product directly from the UI.
+- **Configurable Frequencies**: Users can tune scrape frequency per product (`Every 30m`, `Every 1h`, `Every 2h`, `Every 6h`).
+- **Interactive Price & Stock Charts**: Visual timeline charts built with Recharts showing price shifts alongside inventory levels over time.
+- **Multi-Channel Alerting**:
+  - **In-App Badges**: Clear badges for price drops (`▼ Price drop (-₹X)`) and back-in-stock items.
+  - **In-App Notification Bell**: Dropdown feed tracking price drops, price increases, and restocks with one-click dismissal.
+  - **Email Alerts (SendGrid)**: Asynchronous email dispatches for price drops, price increases, and restocks.
+- **Transparent Diagnostics**: Every single attempt (successful, retried, or failed) is visible with its execution duration, attempt count, and exact error reason in the scrape log table.
 
 ---
 
-## Setup (local development)
+## Tech Stack & Architectural Rationale
 
-### Prerequisites
-
-- Node.js 18+
-- A free [Supabase](https://supabase.com) project
-- (Optional, for headed demo recording) a desktop OS with a display
-
-### 1. Database — Supabase
-
-1. Create a new Supabase project at <https://app.supabase.com>.
-2. Open the SQL editor and paste in [`db/schema.sql`](./db/schema.sql).
-3. Run it. You should see four tables (`tracked_products`, `price_history`,
-   `scrape_logs`, `scrape_lock`) and one view (`latest_price_per_product`).
-4. From *Project Settings → API*, copy the **Project URL** and the
-   **service_role** key (NOT the anon key — the backend is a trusted server
-   and must bypass RLS).
-
-### 2. Backend — local
-
-```bash
-cd backend
-cp .env.example .env
-# fill in SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, CRON_SECRET
-npm install
-# install Playwright Chromium once:
-npx playwright install chromium
-npm start          # http://localhost:3001
-```
-
-Generate a strong `CRON_SECRET`:
-
-```bash
-openssl rand -hex 32
-```
-
-Smoke test (no DB required):
-
-```bash
-curl http://localhost:3001/api/health
-curl 'http://localhost:3001/api/search?q=domus'
-```
-
-### 3. Scraper — isolation test (no Express, no DB)
-
-Run the scraper standalone against the real mock store to verify the
-retry / backoff / validation / extraction logic works before wiring it
-into the API:
-
-```bash
-# headless (default)
-npm run scrape -- 921 36 459
-
-# HEADED (visible browser — for the demo recording; needs a real display)
-npm run scrape:headed -- 921
-# or:
-HEADLESS=false npm run scrape -- 921
-```
-
-Output is a JSON object per product showing outcome (`success` /
-`retried` / `failed`), attempts made, price, stock, and any failure reason.
-
-### 4. Frontend — local
-
-```bash
-cd frontend
-npm install
-npm run dev       # http://localhost:5173
-```
-
-Vite proxies `/api/*` to `http://localhost:3001` (see `vite.config.js`),
-so you don't need to set `VITE_BACKEND_URL` for local dev.
+| Layer | Technology | Engineering Rationale |
+| :--- | :--- | :--- |
+| **Frontend** | React (Vite) on Vercel | Clean component separation, responsive design system, and fast client-side routing with `vercel.json` rewrites. |
+| **Backend** | Node.js + Express on Render | Lightweight server driving headless Playwright Chromium. |
+| **Database** | Supabase (Managed PostgreSQL) | Relational persistence for tracked products, price history, transparent scrape logs, and concurrency locks. |
+| **Catalog Search** | Native `fetch()` | Direct JSON queries to `/api/products`. Zero browser overhead for search. |
+| **Price & Stock Extraction** | Playwright Chromium | Solves WASM PoW challenges, simulates cursor telemetry, and de-obfuscates character-split DOM carriers. |
+| **Automated Scheduling** | External Cron (`cron-job.org`) | Bypasses free-tier PaaS sleep cycles by triggering webhook scrapes externally. |
+| **Email Alerts** | SendGrid API | Non-blocking, isolated email alerts with strict timeouts. |
 
 ---
 
-## Deployment
+## Scraping Schedule & Lifecycle
 
-### Backend → Render
+### 1. The 2-Hour Automated Cycle
+Free-tier hosting platforms (such as Render) spin down container instances after 15 minutes of inactivity. Rather than relying on a fragile internal `setInterval` loop that dies when the instance sleeps, scheduling is driven externally:
+- **`cron-job.org`** sends a `POST` request to `/api/scrape-trigger` every 2 hours (`0 */2 * * *`).
+- The request includes an `X-Cron-Secret` header matching the backend's `CRON_SECRET`.
+- When received, the backend acquires a mutual exclusion lock (`scrape_lock` table) to prevent overlapping runs.
+- The scraper iterates through tracked products sequentially (concurrency = 1) to respect the mock store's rate limits.
+- For each product, the backend checks whether `next_scrape_due_at <= now()`. If not yet due, it skips cleanly; if due, it scrapes and advances the schedule by `scrape_interval_minutes`.
 
-1. Push the repo to GitHub.
-2. On Render, create a new **Web Service** from the GitHub repo, with:
-   - **Root Directory:** `backend`
-   - **Build Command:** `bash render-build.sh`
-   - **Start Command:** `npm start`
-   - **Environment variables** (see below)
-3. Render will assign a port via `PORT` automatically — don't set it.
+### 2. Manual On-Demand Scraping
+Users can click **"Scrape"** on any product row in the dashboard or detail view. This immediately fires an isolated headless run for that specific product, updates its latest price, logs the attempt, and checks for price drop/increase alerts.
 
-The `render-build.sh` script installs Playwright Chromium **and** the OS
-shared libraries it links against, which Render's base image is missing.
-
-### Frontend → Vercel
-
-1. On Vercel, import the same GitHub repo.
-2. Set:
-   - **Root Directory:** `frontend`
-   - **Build Command:** `npm run build`
-   - **Output Directory:** `dist`
-   - **Environment variable:** `VITE_BACKEND_URL=https://<your-render-url>`
-3. Deploy. `vercel.json` already routes unknown paths to `index.html`
-   so client-side routing works.
-
-### Cron → cron-job.org
-
-1. Sign up at <https://cron-job.org>.
-2. Create a job:
-   - **URL:** `https://<your-render-url>/api/scrape-trigger`
-   - **Method:** `POST`
-   - **Schedule:** every 2 hours (e.g. `0 */2 * * *`)
-   - **Headers:** `X-Cron-Secret: <your CRON_SECRET value>`
-3. Save. You can hit "Run now" to test before the next scheduled slot.
+### 3. Keeping Free Instances Warm (Optional)
+To avoid 30–50 second cold starts when opening the web app, a secondary 10-minute ping job on `cron-job.org` hits `GET /api/health`. Because `/api/health` performs no database or browser work, it consumes virtually zero resources while keeping the backend container awake.
 
 ---
 
-## Environment variables (complete list)
+## Environment Variables
 
 ### Backend (`backend/.env`)
 
-| Variable                       | Required | Description                                                            |
-| ------------------------------ | -------- | ---------------------------------------------------------------------- |
-| `SUPABASE_URL`                 | yes      | Supabase project URL, e.g. `https://abcd.supabase.co`                  |
-| `SUPABASE_SERVICE_ROLE_KEY`    | yes      | Service role key (NOT anon). Backend is trusted, bypasses RLS.         |
-| `CRON_SECRET`                  | yes      | Long random string. cron-job.org must send it in `X-Cron-Secret`.      |
-| `INE_STORE_BASE_URL`           | no       | Default `https://demo.inelabteamdev.com`.                              |
-| `INE_FETCH_TIMEOUT_MS`         | no       | Default `15000`. Per-catalog-fetch timeout.                            |
-| `HEADLESS`                     | no       | `false` → run scraper headed (demo recording). Anything else → headless. |
-| `SCRAPER_CONCURRENCY`          | no       | Default `1`. How many products to scrape in parallel. Keep at 1.       |
-| `SCRAPE_STALE_AFTER_MINUTES`   | no       | Default `15`. If a run crashes without releasing the lock, the next run forcibly takes it after this long. |
-| `SENDGRID_API_KEY`             | no       | SendGrid API key for automated price-drop and back-in-stock email alerts. |
-| `ALERT_EMAIL`                  | no       | Target email address to receive price-drop & back-in-stock alerts. |
-| `SENDGRID_FROM_EMAIL`          | no       | Verified sender email on SendGrid. Default `alerts@ine-tracker.local`. |
-| `CORS_ORIGINS`                 | no       | Default `*`. Comma-separated allowed origins. Lock down in production with auth. |
-| `PORT`                         | no       | Default `3001`. Render injects this automatically.                     |
-| `NODE_ENV`                     | no       | `production` for less verbose logging.                                 |
+| Variable | Required | Default | Description |
+| :--- | :---: | :---: | :--- |
+| `PORT` | No | `3001` | Local port. Injected automatically by Render in production. |
+| `NODE_ENV` | No | `development` | Set to `production` in production environments. |
+| `SUPABASE_URL` | **Yes** | — | Supabase Project URL (e.g. `https://xxxx.supabase.co`). |
+| `SUPABASE_SERVICE_ROLE_KEY` | **Yes** | — | Supabase `service_role` secret key (bypasses RLS). |
+| `CRON_SECRET` | **Yes** | — | Shared secret token. Must match `X-Cron-Secret` in cron-job.org. |
+| `INE_STORE_BASE_URL` | No | `https://demo.inelabteamdev.com` | Base URL of the mock store. |
+| `INE_FETCH_TIMEOUT_MS` | No | `15000` | Timeout for catalog search API requests. |
+| `HEADLESS` | No | `true` | `false` enables headed browser mode (useful for demo video recordings). |
+| `SCRAPER_CONCURRENCY` | No | `1` | Number of simultaneous browser scrapes (keep at 1 for stability). |
+| `SCRAPE_STALE_AFTER_MINUTES` | No | `15` | Timeout after which a locked scrape is considered crashed and released. |
+| `CORS_ORIGINS` | No | `*` | Allowed origins (e.g. `https://your-app.vercel.app` or `*`). |
+| `SENDGRID_API_KEY` | No | — | SendGrid API key for email alerts. |
+| `ALERT_EMAIL` | No | — | Target email address to receive price drop/increase alerts. |
+| `SENDGRID_FROM_EMAIL` | No | `alerts@ine-tracker.local` | Verified sender email in your SendGrid account. |
+| `PLAYWRIGHT_BROWSERS_PATH` | No | `0` | Forces Playwright to store browsers in `node_modules` for container persistence. |
 
 ### Frontend (`frontend/.env`)
 
-| Variable             | Required | Description                                              |
-| -------------------- | -------- | -------------------------------------------------------- |
-| `VITE_BACKEND_URL`   | no\*     | Backend URL. \*In local dev, leave blank — Vite proxies. In production, set to your Render URL. |
+| Variable | Required | Default | Description |
+| :--- | :---: | :---: | :--- |
+| `VITE_BACKEND_URL` | No* | `""` | Base URL of your backend. Leave blank in local dev (Vite proxies `/api`). Set to your Render URL in production (e.g. `https://ine-price-tracker-backend-l401.onrender.com`). |
 
 ---
 
-## Scraping schedule
+## Local Development Setup
 
-- **Every 2 hours**, `cron-job.org` POSTs to `/api/scrape-trigger`.
-- The endpoint checks the secret, then the overlap lock. If a previous
-  run is still going, it skips cleanly and returns HTTP 409.
-- Otherwise it launches one shared Playwright browser and scrapes every
-  tracked product **sequentially** (concurrency = 1; the mock store is
-  intentionally flaky under concurrent load).
-- For each product:
-  - 3 outer attempts with backoff (0s, 4s, 10s before attempts 1, 2, 3).
-  - Each attempt: navigate → simulate the required 8+ mouse moves + 600ms+
-    dwell on the price area → click "Reveal price" if needed → wait up to
-    30s for `.price-block.price-success` (or `.price-block.price-error`).
-  - Extract price + stock from the rendered DOM, skipping the honeypot
-    `display:none` `.price-value` span. Validate `price > 0` and
-    `stock >= 0` before declaring success.
-- **On success/retried**: insert one `price_history` row + one `scrape_logs` row.
-- **On failure**: insert ONLY a `scrape_logs` row with the honest reason.
-  `price_history` is NEVER written on failure — the last known good price
-  remains the latest data point.
+### 1. Database Setup (Supabase)
+1. Create a free project at [supabase.com](https://supabase.com).
+2. Navigate to the **SQL Editor** tab.
+3. Open [`db/schema.sql`](./db/schema.sql), copy the entire SQL script, paste it into the editor, and click **Run**.
+4. Go to **Project Settings** → **API**:
+   - Copy **Project URL**.
+   - Copy the **`service_role`** key under *Project API Keys*.
 
----
-
-## API reference
-
-| Method & path                                | Description                                  |
-| -------------------------------------------- | -------------------------------------------- |
-| `GET  /api/health`                           | Liveness check. No auth.                     |
-| `GET  /api/search?q=...`                     | Search INE's catalog by name/brand/category. |
-| `POST /api/tracked-products`                 | Body: `{sourceProductId}`. Track a product.  |
-| `GET  /api/tracked-products`                  | List all tracked products + latest price.    |
-| `GET  /api/tracked-products/:id`             | Get one tracked product + latest price.      |
-| `DELETE /api/tracked-products/:id`            | Untrack (cascades to history + logs).         |
-| `GET  /api/tracked-products/:id/history`     | Price history rows (for the chart).           |
-| `GET  /api/tracked-products/:id/logs`        | Scrape log rows (failures included).          |
-| `GET  /api/scrape-trigger/status`            | Read-only lock status. No auth.              |
-| `POST /api/scrape-trigger`                    | Run a scrape. **Requires `X-Cron-Secret`.**   |
-
----
-
-## Headed demo recording
-
-The required 2–4 minute screen recording shows the scraper running in headed
-mode against the live mock store, including how it handles a slow/failing
-response.
-
+### 2. Backend Setup
 ```bash
 cd backend
-HEADLESS=false npm run scrape -- 921 36 459
+cp .env.example .env
+# Edit .env with your SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, and CRON_SECRET
+
+npm install
+npx playwright install chromium
+npm start
+```
+The server will run at `http://localhost:3001`. Verify with:
+```bash
+curl http://localhost:3001/api/health
 ```
 
-The console output prints each attempt, the backoff between attempts, the
-final outcome (`success` / `retried` / `failed`), and the extracted price +
-stock. The visible browser window shows the React SPA loading, the
-simulated hover/mouse-move interaction on the price area, the "Reveal
-price" button being clicked, and the price-block transitioning from
-`price-idle` → `price-success` (or, on a real failure, `price-error`).
+### 3. Standalone Scraper CLI (Isolation Testing)
+You can test the scraper against specific mock store product IDs without running Express or Supabase:
+```bash
+# Headless scrape
+npm run scrape -- 921 41 201
 
-If a slow/failing moment doesn't occur naturally in one take, run the
-scraper 3–5 more times — the mock store is intentionally flaky and will
-eventually produce a real failure or slow load that the scraper handles
-live.
+# Headed mode (visible browser window for inspection/recording)
+npm run scrape:headed -- 921
+```
 
----
-
-## Project decisions worth knowing
-
-- **No login/auth** — there is a single shared list of tracked products,
-  per the assignment. CORS is `*` in dev; lock down to your Vercel URL
-  in production.
-- **Sequential scraping (concurrency = 1)** — the mock store is
-  deliberately fragile under concurrent load. Sequential is slower but
-  dramatically more reliable. This is the right trade-off for this
-  assignment.
-- **One shared browser per scrape-trigger run** — opening a browser per
-  product would multiply cold-start cost. We launch once and create a
-  fresh context per product (for cookie/session isolation).
-- **Stock is an integer, not a boolean.** The site shows a count;
-  `stock_quantity = 0` is "out of stock", anything else is "in stock".
-- **Scrape log is append-only.** Failures are recorded honestly; the
-  frontend renders them with red highlighting so they are impossible to
-  miss.
+### 4. Frontend Setup
+```bash
+cd frontend
+npm install
+npm run dev
+```
+Open `http://localhost:5173` in your browser.
 
 ---
 
-## Bonus features implemented
+## Production Deployment Guide
 
-The following three bonus features from the assignment specification are fully implemented:
+### 1. Backend on Render
+1. Create a **New Web Service** from your GitHub repository.
+2. Configure settings:
+   - **Root Directory**: `backend`
+   - **Runtime**: `Node`
+   - **Build Command**: `bash render-build.sh`
+   - **Start Command**: `npm start`
+   - **Instance Type**: `Free`
+3. Add Environment Variables:
+   - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`, `NODE_ENV=production`, `HEADLESS=true`, `PLAYWRIGHT_BROWSERS_PATH=0`
+   - Optional SendGrid vars: `SENDGRID_API_KEY`, `ALERT_EMAIL`, `SENDGRID_FROM_EMAIL`.
+4. Deploy and copy your assigned URL (e.g. `https://ine-price-tracker-backend-l401.onrender.com`).
 
-1. **In-App Price-Drop & Back-in-Stock Alerts**:
-   - Each successful scrape automatically evaluates against the product's historical price and stock.
-   - If the new price is lower than the previous one, `is_price_drop` is flagged and `price_change` is calculated.
-   - If stock transitions from 0 to positive, `is_back_in_stock` is flagged.
-   - Displayed with high-contrast, editorial badges (`▼ Price drop (-₹X)` and `● Back in stock`) on both the dashboard tracked list and product detail page, as well as highlighted in the historical timeline table.
+### 2. Frontend on Vercel
+1. Import your GitHub repository in Vercel.
+2. Configure settings:
+   - **Root Directory**: `frontend`
+   - **Framework Preset**: `Vite`
+3. Under **Environment Variables**, add:
+   - `VITE_BACKEND_URL` = `https://<your-render-backend-url>.onrender.com` (no trailing slash).
+4. Deploy.
 
-2. **Configurable Scrape Frequency per Product**:
-   - Each product has a dedicated `scrape_interval_minutes` setting (selectable from `30m`, `1h`, `2h`, `6h`) and a `next_scrape_due_at` timestamp.
-   - The user can change the frequency on either the dashboard or product detail page via a clean inline selector.
-   - When external cron triggers hit `/api/scrape-trigger`, the backend checks whether `next_scrape_due_at <= now()`, scraping only due items and cleanly skipping others with clear logged diagnostics.
-
-3. **Email Alerts via SendGrid**:
-   - When a price drop or back-in-stock event is recorded, an alert is dispatched to `ALERT_EMAIL` using SendGrid (`https://api.sendgrid.com/v3/mail/send`).
-   - Runs in complete isolation with strict timeouts and try/catch guarantees — network outages or unconfigured API keys will never interrupt, slow down, or fail the core scraping and logging cycle.
+### 3. Automated Cron on `cron-job.org`
+1. Create a new cron job on [cron-job.org](https://cron-job.org).
+2. Set:
+   - **URL**: `https://<your-render-backend-url>.onrender.com/api/scrape-trigger`
+   - **Schedule**: Every 2 hours (`0 */2 * * *`)
+   - **Method**: `POST`
+   - **Header**: `X-Cron-Secret: <your CRON_SECRET value>`
+   - **Timeout**: `60` or `120` seconds.
 
 ---
 
-## What I'd improve next (given more time)
+## Headed Demo Recording Instructions
 
-1. **Page-structure change detection** — hash the rendered HTML layout or track structural element counts and flag in `scrape_logs` if the store updates its DOM hierarchy.
-2. **Webhook notifications** — allow users to configure Discord or Slack webhook endpoints for instant team notifications.
-
+To record the 2–4 minute demo showing real-time Playwright automation handling late loading and interaction gates:
+```bash
+cd backend
+HEADLESS=false npm run scrape -- 921 41 201
+```
+The browser window will open on your desktop, demonstrating:
+1. Automated cookie banner dismissal.
+2. Simulated cursor movements and dwell time on the price block to pass the telemetry gate.
+3. Clicking the "Reveal price" button.
+4. Waiting for WASM PoW computation and loading state resolution.
+5. Accurate extraction of clean price and stock values printed to stdout.

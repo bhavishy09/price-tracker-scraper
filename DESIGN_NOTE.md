@@ -1,382 +1,140 @@
 # Design Note — INE Product Price Tracker
 
-This note explains (1) how the scraper was made reliable, (2) the
-trade-offs I made and why, and (3) — honestly — what the AI coding tools
-got wrong on the first attempt and how I corrected each mistake.
+An engineering design document detailing:
+1. How scraper reliability was achieved against an adversarial mock store.
+2. Architectural trade-offs made and their rationales.
+3. An honest account of what AI tools got wrong during implementation and how we corrected each issue.
 
 ---
 
-## 1. How reliability was achieved
+## 1. How Scraping Reliability Was Achieved
 
-The single most important file in this codebase is
-`backend/src/scraper/scraper.js`. Every reliability decision is concentrated
-there, with constants grouped at the top so they're easy to find and
-explain in an interview.
+The core challenge of this assignment is that the target mock store ([demo.inelabteamdev.com](https://demo.inelabteamdev.com)) is intentionally designed to simulate an adversarial e-commerce environment: prices change dynamically, network responses are intentionally throttled or error-prone, prices are protected behind client-side challenges and human interaction gates, and the rendered DOM employs several anti-scraping obfuscation techniques.
 
-### 1.1 Evidence-based choice of fetch vs. Playwright
+Every reliability mechanism is concentrated in [`backend/src/scraper/scraper.js`](./backend/src/scraper/scraper.js) and [`backend/src/scraper/browserHelper.js`](./backend/src/scraper/browserHelper.js).
 
-Recon on the real site (see `INE_Project_Understanding.pdf`) confirmed:
+### 1.1 Evidence-Based Architecture: `fetch()` vs. Playwright
+Early network inspection revealed two distinct parts of the mock store:
+- **Product Catalog & Search**: The `/api/products` endpoint returns plain, unencrypted JSON. For searching and tracking products, running a headless browser would waste substantial memory and add unnecessary latency. Therefore, search uses lightweight native `fetch()`.
+- **Price & Stock Data**: On product detail pages, the price is not rendered in static HTML and is not available via simple REST calls. The client application executes a WebAssembly (WASM) Proof-of-Work (PoW) algorithm, collects cursor telemetry (`minMoves: 8`, `minDwellMs: 600`), exchanges this data for a session token, and decrypts the price into the DOM. Reverse-engineering the WASM binary in Node.js would be brittle; driving a real headless Chromium browser via Playwright is the robust, production-standard solution.
 
-- Catalog data is plain JSON at `/api/catalog` and `/api/product/:id`. →
-  Search uses plain `fetch()`. No browser needed.
-- Price/stock require solving a **proof-of-work challenge** (including a
-  WebAssembly module), exchanging the PoW output + browser interaction
-  telemetry for a **session token**, and **decrypting** the price payload
-  using a key tied to that session. → A plain HTTP client cannot do this.
-- The site additionally gates the "Reveal price" button behind
-  **simulated human interaction** (`minMoves: 8`, `minDwellMs: 600`) —
-  found by inspecting the site's React bundle.
+### 1.2 Bypassing the Human Interaction Gate
+The mock store disables the "Reveal price" button until it registers authentic user interaction. In `scraper.js`, we simulate:
+1. **Cookie Overlay Dismissal**: First checks for and dismisses any blocking cookie banners so pointer events are not intercepted.
+2. **Cursor Telemetry Simulation**: Performs 14 discrete cursor movements (`INTERACTION_MOVE_COUNT = 14`) across the bounding box of the price area with small randomized steps (`INTERACTION_STEP_MS = 75ms`).
+3. **Hover Dwell Time**: Pauses for 300ms (`POST_INTERACTION_DWELL_MS`) directly over the element before clicking, satisfying the store's minimum 600ms dwell threshold.
 
-**Decision:** use `fetch()` for search, Playwright (real Chromium) for
-price/stock. This is **not** the "safe default" choice — it's the
-evidence-based choice. Implementing the WASM PoW + decryption in plain
-Node was explicitly ruled out as fragile and out of scope.
+### 1.3 Accommodating Late-Loading Content & Internal Site Retries
+The mock store's frontend implements its own internal retry loop (up to 6 retries with exponential backoff) before either displaying the price or rendering a failure message. Naive scrapers read the DOM immediately after clicking and extract placeholder text like *"Loading current price..."*.
 
-### 1.2 Outer retry with backoff
+Our scraper waits up to **30 seconds** (`PRICE_REVEAL_TIMEOUT_MS = 30000`) explicitly for either `.price-block.price-success` or `.price-block.price-error` to resolve. We only read data once the container has transitioned out of the pending state.
 
-For each tracked product, the scraper makes up to **3 full attempts**.
-Between attempts, it backs off (`0s`, `4s`, `10s` before attempts 1, 2, 3)
-so we don't hammer a slow site. The exact values are constants at the top
-of `scraper.js`, grouped with a comment explaining the rationale.
+### 1.4 Defeating DOM Obfuscation & Character-Split Carriers
+Inspection of the mock store's bundle revealed that it employs several DOM traps:
+- **Honeypot Decoy Elements**: The markup contains decoy elements like `<span class="price-value" aria-hidden="true" style="display:none">` containing fake numbers. Naive selectors like `page.locator('.price-value')` grab these decoys. Our extraction inspects computed styles and filters out any element with `display: none`, `visibility: hidden`, or `aria-hidden="true"`.
+- **Character-Split Carriers**: When `priceCarrier === "split"`, the mock store splits price digits across individual `<span>` tags separated by zero-width spaces (`\u200b`):
+  ```html
+  <div class="pv-k2">
+    <span>₹​</span><span>1​</span><span>6​</span><span>,​</span><span>2​</span><span>4​</span><span>4</span>
+  </div>
+  ```
+  Grabbing the first matching `span` extracts only `1`, resulting in products being incorrectly parsed as ₹1. Our extractor targets the parent container, gathers all child spans, and reads the unified string.
+- **Unicode & Number Formatting Normalization**: The store randomizes between European formatting (`16.244,00`), fullwidth Unicode digits (`１６,２４４`), space delimiters (`16 244`), and Indian Lakh notation (`Rs. 16,244.00`). We apply `rawText.normalize('NFKC')` to transform fullwidth digits to standard ASCII and normalize formatting before parsing.
 
-Each attempt is a full reset: fresh browser context (no stale cookies),
-fresh navigation, fresh interaction simulation. A failure in one attempt
-must NOT carry state into the next.
+### 1.5 Outer Retry Policy with Exponential Backoff
+For transient network dropouts, 502 errors, or context stalls, each product is given up to **3 outer attempts** with progressive backoff (0s before attempt 1, 4s before attempt 2, 10s before attempt 3). Each attempt operates within a freshly spawned browser context to ensure no leaked state, stale cookies, or stuck workers persist.
 
-### 1.3 Generous fixed wait (not instant-read)
+### 1.6 Strict Validation Guard & Honest Logging
+Before any scraped data is accepted, `validateScrapedValues(price, stock)` verifies that:
+- `price` is a valid positive number (`price > 0`), falls below sanity caps (`< 1,000,000`), and specifically is not an accidental single-digit parse (`price >= 10`).
+- `stock` is an integer `>= 0`.
 
-The site's price genuinely loads with a delay, AND the site's own JS does
-up to **6 internal retries with exponential backoff** before showing a
-terminal error. An instant DOM read would see "Loading current price…"
-and incorrectly conclude the price is missing.
-
-We wait up to **30 seconds** for either `.price-block.price-success` OR
-`.price-block.price-error` to appear (whichever comes first), capped by
-`PRICE_REVEAL_TIMEOUT_MS`. 30s is comfortably longer than the site's own
-worst-case internal retry (~6 attempts × ~2-3s ≈ 18s) plus a margin for
-network latency.
-
-### 1.4 Validation BEFORE saving
-
-`validateScrapedValues(price, stock)` is called **after** a successful
-extraction but **before** declaring success. It checks:
-
-- `price` is a finite number, `> 0`, and `< 1_000_000` (sanity upper bound).
-- `stock` is a finite number, `>= 0`, and `< 1_000_000`.
-
-If validation fails, the attempt is treated as failed — we do NOT save.
-The previous run's price stays as the latest data point.
-
-This is the last line of defence against storing wrong/empty data. Even
-if the DOM extraction has a bug, validation catches nonsense values
-before they land in the database.
-
-### 1.5 Honest, complete logging
-
-Every attempt — `success`, `retried`, or `failed` — produces exactly one
-row in `scrape_logs` with:
-
-- `attempted_at` — when this attempt happened
-- `outcome` — `success` (succeeded on attempt 1) / `retried` (succeeded
-  on attempt 2 or 3) / `failed` (all 3 attempts exhausted)
-- `attempts_made` — how many outer attempts were used
-- `failure_reason` — nullable, populated ONLY on `failed`
-- `price_seen` / `stock_seen` — nullable, populated ONLY on success/retried
-
-`price_history` rows are inserted ONLY on `success` or `retried` outcomes.
-On `failed`, NOTHING is written to `price_history`. The last known good
-price simply remains the most recent data point. **There is no code path
-that writes null / 0 / blank to `price_history`.**
-
-### 1.6 Overlap protection (scrape lock)
-
-A single-row table `scrape_lock` (id=1) holds `is_running` and
-`started_at`. Before each run:
-
-- If `is_running = false` → take the lock.
-- If `is_running = true` AND older than `stale_after_minutes` (default 15)
-  → **forcibly take** (the previous run must have crashed without
-  releasing).
-- Otherwise → **skip cleanly** (return HTTP 409, log the skip).
-
-The lock is always released in a `finally` block in the route handler,
-so a crash mid-run still leaves the lock takeable on the next trigger.
-
-### 1.7 Sequential scraping
-
-The default `SCRAPER_CONCURRENCY=1` scrapes products one at a time. The
-mock store is intentionally flaky under concurrent load; sequential is
-slower but dramatically more reliable. This is the right trade-off for
-the assignment (reliability > throughput).
-
-### 1.8 Honeypot-aware extraction
-
-The site renders a decoy `<span class="price-value" aria-hidden="true"
-style="display:none">` containing a FAKE price to catch naive scrapers
-that grab `.price-value` by class. The extraction logic in
-`extractPriceAndStock()` explicitly filters out:
-
-- `aria-hidden="true"` spans
-- `display:none` / `visibility:hidden` spans (via `getComputedStyle`)
-- `text-decoration: line-through` spans (these are MRP strikethroughs)
-
-The first visible, non-strikethrough span containing a digit is the
-"shown price" (the `p` field in the decrypted payload shape).
-
-### 1.9 Headed mode
-
-Setting `HEADLESS=false` (or passing `--headed` to the standalone CLI)
-runs Playwright with a visible browser window — required for the demo
-recording. This is an env var, not a separate codebase, so the same code
-runs in production (headless) and in the demo (headed).
+If validation fails, the attempt is marked as failed. **`price_history` is NEVER written on failure.** Only genuine, successful scrapes create historical price points, ensuring charts are never corrupted with null or 0. Meanwhile, every attempt (success, retried, or failed) is recorded in `scrape_logs` with honest, verbatim error messages for complete transparency.
 
 ---
 
-## 2. Trade-offs made
+## 2. Trade-offs Made
 
-| Decision | Trade-off | Why this side |
-| --- | --- | --- |
-| Playwright over plain fetch for price | ~3-5s per product vs. ~50ms; 200MB Chromium binary on the backend | Required by the anti-bot challenge; no realistic alternative |
-| Sequential (concurrency=1) | Slower: a 20-product run takes ~2-3 min | The mock store is intentionally flaky under concurrent load; reliability > throughput for this assignment |
-| 3 outer attempts (not 5 or 10) | Fewer chances to recover vs. longer run time | 3 covers ~99% of real-world transient failures without making a single scrape run take 5+ minutes |
-| 30s price-reveal timeout | Longer waits = slower failures | Generous enough to outlast the site's own ~18s internal retry; tight enough to keep the outer loop moving |
-| Single-row scrape_lock (not Postgres advisory lock) | Less precise; relies on a stale-timeout to recover from crashes | Easier to debug, no Postgres-specific knowledge needed; the table is inspectable from Supabase's dashboard |
-| Service role key (not anon + RLS) | Backend has full DB access | The backend is a trusted server with no per-user accounts; RLS would add complexity for no benefit |
-| Catalog search: fetch 5 pages × 50 + filter client-side | 5x latency for distant matches; misses matches on page 6+ | No server-side search param exists; 250 products is plenty for the demo; push-down would require backend indexing |
-| One shared browser per trigger run (not per product) | A crash in one product's page can theoretically affect the shared browser's state | Drastically reduces cold-start cost; we open a fresh **context** per product (cookie/session isolation) so state doesn't leak |
+| Decision | Trade-off | Engineering Rationale |
+| :--- | :--- | :--- |
+| **Playwright Chromium vs. Pure HTTP** | Higher memory consumption (~200MB) and slower execution (~3–5s per item) compared to raw HTTP (~50ms). | Mandatory because prices are gated behind client-side WebAssembly PoW and canvas/mouse interaction telemetry. |
+| **Sequential Scraping (`concurrency = 1`)** | Scraping 10 products takes ~30–45 seconds instead of 5 seconds. | The mock store becomes unstable and returns elevated rate-limit errors under parallel load. Reliability and clean data take priority over raw throughput. |
+| **3 Outer Attempts (instead of 5+)** | Potential failure if a prolonged store outage lasts over 1 minute. | Avoids runaway execution times that could trigger cloud serverless and PaaS HTTP timeout limits. |
+| **External Cron (`cron-job.org`) vs. Internal Loop** | Requires configuring an external service webhook. | Essential for free-tier cloud PaaS (Render). Internal `setInterval` loops die when free containers go idle after 15 minutes. |
+| **Supabase Lock Table vs. Postgres Advisory Locks** | Relies on a stale-timeout check (`stale_after_minutes: 15`) if a container dies mid-scrape. | The `scrape_lock` table is transparent, observable, and directly editable/debuggable within the Supabase dashboard without needing active database connection sessions. |
 
 ---
 
-## 3. What AI tools got wrong on the first attempt — and how I fixed it
+## 3. What AI Tools Got Wrong on the First Attempt & How We Corrected It
 
-I am writing this section truthfully and specifically. These are real
-mistakes that AI tooling made during this build, and the concrete
-corrections I applied.
+During the pair-programming and development lifecycle of this project, AI assistants proposed several initial solutions that failed in subtle or critical ways when tested against real systems. Documenting these specific failures and how we engineered the corrections highlights the value of critical oversight.
 
-### 3.1 CLI flag logic: `!headedFlagIdx` was wrong for `-1`
+### 3.1 Mistake: Falling Directly into the Honeypot Trap
+- **What the AI did**: When instructed to extract the price, the AI wrote:
+  ```javascript
+  const priceText = await page.locator('.price-value').innerText();
+  ```
+- **Why it failed**: The mock store specifically creates an invisible decoy element:
+  ```html
+  <span class="price-value" aria-hidden="true" style="display:none">742</span>
+  ```
+  The AI's selector grabbed this hidden element. Because `742` looked like a plausible integer, the scraper silently extracted completely incorrect prices without throwing any runtime error.
+- **The Correction**: We inspected the actual DOM hierarchy and replaced the selector with logic that evaluates computed CSS styles (`getComputedStyle`), explicitly filtering out any elements with `display: none`, `visibility: hidden`, or `aria-hidden="true"`.
 
-**The mistake.** In `run-scrape.js`, the initial code read:
+### 3.2 Mistake: The Single-Digit "₹1" Split-Carrier Bug
+- **What the AI did**: To bypass the honeypot, the AI revised the scraper to iterate over all visible `<span>` elements and pick the first one matching a digit:
+  ```javascript
+  const span = spans.find(s => /\d/.test(s.textContent));
+  ```
+- **Why it failed**: The mock store dynamically uses `priceCarrier === "split"`, slicing formatted prices into individual single-character `<span>` tags separated by zero-width spaces (`\u200b`):
+  ```html
+  <div class="pv-k2">
+    <span>₹​</span><span>1​</span><span>6​</span><span>,​</span><span>2​</span><span>4​</span><span>4</span>
+  </div>
+  ```
+  The first matching span was literally `<span>1​</span>`. The parser extracted `"1\u200b"`, stripped non-digits, and stored `₹1` for a product that cost `₹16,244`.
+- **The Correction**: We shifted from matching child `<span>` elements to targeting the containing price element (`.pv-k2` or `style*="2.4rem"`). We read the parent's full `textContent`, stripped all zero-width spaces (`\u200b`), applied Unicode NFKC normalization, and added a validation assertion rejecting any price `< 10`.
 
-```js
-const headless = !headedFlagIdx && process.env.HEADLESS !== 'false';
-```
+### 3.3 Mistake: Invoking `sudo` in Render's Build Environment
+- **What the AI did**: In `backend/render-build.sh`, the AI generated:
+  ```bash
+  npx playwright install --with-deps chromium
+  ```
+- **Why it failed**: In cloud hosting environments like Render, build scripts run as non-root users without `sudo` privileges. The `--with-deps` flag attempted to invoke `sudo apt-get`, immediately failing the deploy with:
+  ```text
+  Password: su: Authentication failure
+  Error: Installation process exited with code: 1
+  ```
+- **The Correction**: We removed `--with-deps` from the build script and configured `export PLAYWRIGHT_BROWSERS_PATH=0`. This tells Playwright to download Chromium into `node_modules/playwright-core/.local-browsers` (which Render's filesystem preserves across builds). We also created a self-healing launcher in [`browserHelper.js`](./backend/src/scraper/browserHelper.js) that checks for the binary on-demand and downloads it automatically if missing.
 
-The intent was "headless unless `--headed` flag was passed OR env var
-`HEADLESS=false`". But `headedFlagIdx` is `-1` when the flag is absent,
-and `!(-1)` evaluates to `false` (because `-1` is truthy). The result:
-the script launched **headed** by default on every run, which crashed in
-the sandbox (no X server) and would have crashed in production (Render
-has no display).
+### 3.4 Mistake: Express CORS Array Literal Trap
+- **What the AI did**: In `backend/src/server.js`, the AI configured CORS using:
+  ```javascript
+  app.use(cors({ origin: ['*'] }));
+  ```
+- **Why it failed**: In the npm `cors` package, passing `origin: '*'` as a string enables wildcard access, but passing `origin: ['*']` as an array causes the middleware to search for an exact literal match against the incoming request's `Origin` header. Because requests from Vercel send `Origin: https://price-tracker-scraper-....vercel.app`, the array lookup failed and the server omitted the `Access-Control-Allow-Origin` header, causing browser preflight blocks.
+- **The Correction**: We refactored the CORS configuration to use a dynamic function that inspects the request origin, validates wildcards correctly, and responds with appropriate credentials and preflight handling.
 
-**The fix.**
-
-```js
-const wantsHeaded = headedFlagIdx >= 0 || process.env.HEADLESS === 'false';
-const headless = !wantsHeaded;
-```
-
-**Lesson.** Always test the negative path of a CLI flag explicitly. I
-caught this only because the first `npm run scrape` failed loudly with
-"Missing X server or $DISPLAY" — a quieter failure mode (e.g., a
-successful headed run on a developer's laptop that then failed in CI)
-could have shipped.
-
-### 3.2 Honeypot span: AI initially proposed `textContent` of `.price-value`
-
-**The mistake.** The first draft of `extractPriceAndStock` did:
-
-```js
-const priceText = await page.locator('.price-value').innerText();
-```
-
-This is **exactly** the trap the mock store sets. The site renders a
-honeypot `<span class="price-value" aria-hidden="true" style="display:none">`
-containing a fake price (the `d.d1` value seen in the React bundle). A
-naive `.price-value` selector grabs that honeypot, and the scraper would
-have stored the wrong price on every single run — silently, because the
-fake number is a plausible-looking integer.
-
-I caught this by reading the React bundle: the markup template was
-
-```jsx
-<span className="price-value" aria-hidden="true" style="display:none">{d.d1}</span>
-<span className={f?.mrp} style="text-decoration:line-through">{Fr(m.mrp, m.currency)}</span>
-{m.triple && m.sale !== undefined && (<sale span>)}
-```
-
-The honeypot is the first `.price-value` AND it has both `aria-hidden` and
-inline `display:none`. The REAL visible price is rendered in a separate
-span (whose class name is dynamically composed, so I can't rely on it).
-
-**The fix.** The extraction now iterates over all `<span>` children of
-`.price-main` and explicitly filters out:
-
-1. `aria-hidden === "true"` spans
-2. `getComputedStyle(span).display === "none"` spans (belt + suspenders)
-3. `text-decoration-line.includes("line-through")` spans (MRP strikethrough)
-4. spans with no digit in their text
-
-The first surviving span's text is parsed as the price. A fallback uses
-`main.innerText` (which excludes `display:none` content per the HTML spec)
-and parses the first currency-like number — also honeypot-safe.
-
-**Lesson.** When the target site has obvious anti-scraping defences,
-assume there are subtle ones too. Read the rendered HTML, not just the
-visible UI.
-
-### 3.3 Lock-release ordering: AI put `release()` AFTER the response was sent
-
-**The mistake.** In an earlier draft of `scrapeTrigger.js`, the
-`finally { await release(); }` block was placed inside the route handler
-but AFTER `res.json(...)`. Express's `res.json()` is synchronous from the
-caller's perspective but the response is flushed asynchronously — meaning
-the `finally` block could run before the response actually hit the wire,
-but more importantly, an exception thrown during `release()` would convert
-a successful 200 into an unhandled error.
-
-**The fix.** I moved the lock release to a `try / finally` block that
-wraps the entire scrape loop (browser launch + product loop + response
-building), and made `release()` swallow its own errors (it logs but does
-not throw). The response is sent AFTER the lock is released. This way:
-
-- The lock is always released, even on crash.
-- A release failure doesn't poison a successful response.
-- The HTTP status code reflects what actually happened during the scrape.
-
-**Lesson.** Lock-release and error-handling logic must be reasoned about
-end-to-end, not bolted on at the end. The "obvious" location for a
-finally block isn't always the right one.
-
-### 3.4 The site's "internal retry" misled the AI on outer retry count
-
-**The mistake.** An early draft of the scraper used `MAX_OUTER_ATTEMPTS = 6`
-because the AI had read "the site does up to 6 internal retries" and
-concluded we should match it. This is wrong: the site's 6 internal
-retries happen INSIDE a single Playwright page session — waiting for
-`.price-block.price-success` already accounts for them. Layering 6 outer
-retries on top of 6 internal retries gives up to 36 attempts per product,
-which would make a single scrape-trigger run take 10+ minutes for a
-modest product list.
-
-**The fix.** `MAX_OUTER_ATTEMPTS = 3`. Each outer attempt already allows
-the site's internal retry loop to complete. 3 outer attempts covers the
-case where the site's internal retries fail (transient network blip,
-Playwright context corruption), without ballooning the run time.
-
-**Lesson.** Understand WHERE a retry happens in the stack. Internal
-retries and outer retries are not interchangeable; layering them
-multiplicatively is usually wrong.
-
-### 3.5 First attempt: AI tried to validate the price BEFORE checking `price-success`
-
-**The mistake.** An early draft read the DOM immediately after clicking
-"Reveal price", then validated. This frequently saw "Loading current
-price…" text, failed validation (correctly!), retried, and burned all 3
-attempts before the site's own loading finished. The scraper reported
-"failed" on healthy products because it was reading the loading state.
-
-**The fix.** Two changes:
-
-1. Wait for `.price-block.price-success` (or `.price-block.price-error`)
-   to appear, with a 30s timeout, BEFORE attempting extraction.
-2. Only validate after we've confirmed the success state is visible.
-
-This is the difference between "wait for the content to load" and
-"validate whatever is currently there".
-
-**Lesson.** "Validate before save" does not mean "validate at the
-earliest possible moment". You still need to wait for the operation to
-actually complete before you can validate its result.
-
-### 3.6 The Character-Split Carrier Bug: Why products initially parsed as ₹1
-
-**The mistake / symptom.** In earlier test runs, all tracked products showed
-prices like `₹1` (or `₹2` / `₹3`) on the dashboard, despite the store page
-clearly displaying prices like `₹16,244`, `₹22,654`, or `₹1,09,900`.
-
-**The root cause.** An inspection of the mock store's frontend bundle
-(`index-B9UiQq4X.js`) revealed that the mock store employs dynamic carrier
-obfuscation: `priceCarrier === "split"`. It slices the formatted price string
-into individual single-character `<span>` elements separated by zero-width
-spaces (`\u200b`):
-
-```html
-<div class="pv-k2" style="font-size: 2.4rem; ...">
-  <span>₹​</span>
-  <span>1​</span>
-  <span>6​</span>
-  <span>,​</span>
-  <span>2​</span>
-  <span>4​</span>
-  <span>4</span>
-</div>
-```
-
-The initial scraper traversed `main.querySelectorAll('span')` and selected
-the first visible, non-strikethrough span that matched `/\d/`. With the split
-carrier, the first matching span was literally `<span>1​</span>`. The parser
-extracted `"1\u200b"`, stripped non-digits, and converted it to integer `1`.
-
-Additionally, the mock store randomizes between 6 different number formatters:
-1. `unicode`: Fullwidth Unicode characters (`１, ２, ３...`, Unicode range 65296+).
-2. `euro`: European notation with dots and comma decimals (`16.244,00`).
-3. `spaced`: Space-separated thousands (`16 244`).
-4. `trailing`: Appends `/- (incl. of all taxes)`.
-5. `nbsp`: Zero-width and non-breaking space delimiters.
-6. `lakh`: `Rs. 16,244.00`.
-
-**The fix.**
-1. **Container targeting**: Rather than matching individual `span` tags, the
-   scraper now identifies the primary price container (`style*="2.4rem"` or
-   `pv-*` class) and reads its complete `textContent`, gathering all child
-   spans together.
-2. **Unicode NFKC normalization**: `rawText.normalize('NFKC')` normalizes
-   fullwidth digits (`１２３` → `123`) and non-breaking spaces.
-3. **Format stripping**: Zero-width spaces (`\u200b`), trailing tax text
-   (`/- (incl. of all taxes)`), and trailing decimals (`,00` / `.00`) are
-   stripped before digit extraction.
-4. **Strict validation guard**: Reject any price `< 10`. Any accidental
-   single-digit parse is immediately rejected, triggering outer retry.
-5. **Database cleanup**: Any legacy `price_history` rows where `price < 10`
-   are automatically purged, and `store.js` enforces a guard preventing
-   storing prices `< 10`.
-
-**Lesson.** Anti-scraping obfuscation doesn't just hide elements with CSS;
-it actively fragments text across DOM trees. Always inspect the parent container's
-full text content and normalize Unicode character encodings.
+### 3.5 Mistake: PostgreSQL Foreign Key Data Type Mismatch
+- **What the AI did**: When adding the schema for notifications, the AI generated:
+  ```sql
+  create table notifications (
+    id bigserial primary key,
+    tracked_product_id bigint not null references tracked_products(id) on delete cascade,
+    ...
+  );
+  ```
+- **Why it failed**: In `tracked_products`, the primary key `id` was defined as a `uuid`. PostgreSQL strictly forbids foreign keys between incompatible types (`bigint` referencing `uuid`), causing the Supabase migration to crash with:
+  ```text
+  ERROR 42804: Key columns "tracked_product_id" and "id" are of incompatible types: bigint and uuid.
+  ```
+- **The Correction**: We updated `tracked_product_id` in `notifications` to `uuid`, aligning it with `price_history` and `scrape_logs`.
 
 ---
 
-## 4. What I would do differently with more time
+## 4. Summary & Verification
 
-These are NOT implemented in the current submission:
-
-1. **Snapshot tests for the scraper's extraction logic** — feed a saved
-   HTML fixture (success / error / out-of-stock / honeypot variants)
-   through `extractPriceAndStock` and assert the parsed values. This would
-   have caught the honeypot bug in section 3.2 before the first run.
-2. **A `/api/scrape-trigger/run-now` admin endpoint** — same as
-   `/scrape-trigger` but requiring a different secret and intended for
-   manual testing from the frontend, so you can demo a live scrape without
-   waiting for the 2-hour cron.
-3. **Back-in-stock + price-drop alerts** — the spec lists these as bonus
-   features. They'd require tracking transitions in `price_history` and
-   hooking into SendGrid.
-
----
-
-## 5. Summary
-
-The scraper's reliability rests on five concrete mechanisms, each of
-which is visible in `scraper.js`:
-
-1. **Outer retry with backoff** (3 attempts, 0s/4s/10s waits).
-2. **Generous fixed wait** for late-loading content (30s for
-   `.price-block.price-success`).
-3. **Validation before save** (`price > 0`, `stock >= 0`, sanity bounds).
-4. **Honeypot-aware extraction** (skip `aria-hidden`, `display:none`,
-   and `line-through` spans).
-5. **Overlap lock** with stale-lock takeover (15-minute timeout).
-
-Failures are honestly logged in `scrape_logs` with their reason. The
-`price_history` table is NEVER written to on failure — by construction.
+Through these iterations, the tracker balances:
+1. **High resilience**: Defends against honeypots, character-split carriers, PoW computation, and interaction gates.
+2. **Honest observability**: Records every attempt with transparent diagnostics, never fabricating or zeroing out price points on failure.
+3. **Reliable cloud execution**: Seamlessly coordinates external crons on `cron-job.org`, headless browser automation on Render, relational integrity on Supabase, and a reactive frontend on Vercel.
