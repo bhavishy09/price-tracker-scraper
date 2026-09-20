@@ -84,6 +84,8 @@ async function sendPriceDropOrStockAlert(product, alertData) {
           },
         },
         (res) => {
+          res.resume();
+          req.setTimeout(0);
           if (res.statusCode >= 200 && res.statusCode < 300) {
             console.log(`[alerts] SendGrid email successfully dispatched to ${recipient} for "${product.name}"`);
             resolve({ sent: true, statusCode: res.statusCode });
