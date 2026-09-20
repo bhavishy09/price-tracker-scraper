@@ -16,6 +16,7 @@ const express = require('express');
 const db = require('../db/store');
 const { fetchProductDetail } = require('../services/catalog');
 const { scrapeProduct } = require('../scraper/scraper');
+const { sendPriceDropOrStockAlert } = require('../services/alerts');
 const config = require('../config');
 
 const router = express.Router();
@@ -28,8 +29,12 @@ async function triggerBackgroundScrape(product) {
     const result = await scrapeProduct(sourceId, { headless: config.scraperHeadless });
     await db.insertScrapeLog(product.id, result);
     if (result.outcome === 'success' || result.outcome === 'retried') {
-      await db.insertPriceHistory(product.id, result.price, result.stock);
+      const histRes = await db.insertPriceHistory(product.id, result.price, result.stock);
+      if (histRes && histRes.alert && (histRes.alert.isPriceDrop || histRes.alert.isBackInStock)) {
+        sendPriceDropOrStockAlert(product, histRes.alert).catch(() => {});
+      }
     }
+    await db.updateNextScrapeDue(product.id, product.scrape_interval_minutes || 120);
     console.log(`[scraper] Auto-scrape finished for ${sourceId}: ${result.outcome}`);
   } catch (err) {
     console.error(`[scraper] Auto-scrape failed for ${product.id}:`, err.message);
@@ -38,6 +43,7 @@ async function triggerBackgroundScrape(product) {
       attempts: 1,
       failureReason: err.message,
     });
+    await db.updateNextScrapeDue(product.id, product.scrape_interval_minutes || 120);
   }
 }
 
@@ -111,6 +117,27 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
+// Update tracked product settings (e.g. scrape_interval_minutes)
+router.patch('/:id', async (req, res) => {
+  try {
+    const { scrape_interval_minutes } = req.body || {};
+    const mins = Number(scrape_interval_minutes);
+    if (![30, 60, 120, 360].includes(mins)) {
+      return res.status(400).json({ error: 'Interval must be 30, 60, 120, or 360 minutes' });
+    }
+
+    const updated = await db.updateTrackedProduct(req.params.id, { scrape_interval_minutes: mins });
+    if (!updated) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    res.json({ updated });
+  } catch (err) {
+    console.error('[tracked-products PATCH] Error:', err.message);
+    res.status(500).json({ error: 'Failed to update product', detail: err.message });
+  }
+});
+
 // Trigger on-demand scrape for this product
 router.post('/:id/scrape', async (req, res) => {
   try {
@@ -136,10 +163,18 @@ router.post('/:id/scrape', async (req, res) => {
     // Always log the scrape attempt
     await db.insertScrapeLog(product.id, result);
 
-    // If successful or retried, insert price history
+    // If successful or retried, insert price history and check for alerts
+    let alertInfo = null;
     if (result.outcome === 'success' || result.outcome === 'retried') {
-      await db.insertPriceHistory(product.id, result.price, result.stock);
+      const histRes = await db.insertPriceHistory(product.id, result.price, result.stock);
+      if (histRes && histRes.alert && (histRes.alert.isPriceDrop || histRes.alert.isBackInStock)) {
+        alertInfo = histRes.alert;
+        sendPriceDropOrStockAlert(product, histRes.alert).catch(() => {});
+      }
     }
+
+    // Update next scrape due timestamp
+    await db.updateNextScrapeDue(product.id, product.scrape_interval_minutes || 120);
 
     res.json({
       success: true,
@@ -148,6 +183,7 @@ router.post('/:id/scrape', async (req, res) => {
       price: result.price ?? null,
       stock: result.stock ?? null,
       failureReason: result.failureReason ?? null,
+      alert: alertInfo,
     });
   } catch (err) {
     console.error('[tracked-products :id/scrape] Error:', err.message);

@@ -78,6 +78,11 @@ async function listTrackedProducts() {
             price,
             stock_quantity: stock,
             scraped_at: at,
+            scrape_interval_minutes: prod.scrape_interval_minutes || 120,
+            next_scrape_due_at: prod.next_scrape_due_at || null,
+            is_price_drop: Boolean(prod.latest_is_price_drop),
+            is_back_in_stock: Boolean(prod.latest_is_back_in_stock),
+            price_change: prod.latest_price_change || 0,
             latest_outcome: log ? log.outcome : null,
             last_attempt_at: log ? log.attempted_at : null,
             failure_reason: log ? log.failure_reason : null,
@@ -91,9 +96,17 @@ async function listTrackedProducts() {
 
   // Memory fallback
   return memDb.products.map((prod) => {
-    const history = memDb.priceHistory
+    const sortedHistory = memDb.priceHistory
       .filter((h) => String(h.tracked_product_id) === String(prod.id))
-      .sort((a, b) => new Date(b.scraped_at) - new Date(a.scraped_at))[0];
+      .sort((a, b) => new Date(b.scraped_at) - new Date(a.scraped_at));
+
+    const history = sortedHistory[0];
+    const latestDrop = sortedHistory.find((h) => h.is_price_drop);
+    const isPriceDrop = Boolean(history?.is_price_drop || (latestDrop && history?.price <= latestDrop.price));
+    const priceChange = history?.is_price_drop ? history.price_change : (latestDrop?.price_change || 0);
+
+    const latestStockAlert = sortedHistory.find((h) => h.is_back_in_stock);
+    const isBackInStock = Boolean(history?.is_back_in_stock || (latestStockAlert && history?.stock_quantity > 0));
 
     const latestLog = memDb.scrapeLogs
       .filter((l) => String(l.tracked_product_id) === String(prod.id))
@@ -113,6 +126,11 @@ async function listTrackedProducts() {
       price,
       stock_quantity: stock,
       scraped_at: at,
+      scrape_interval_minutes: prod.scrape_interval_minutes || 120,
+      next_scrape_due_at: prod.next_scrape_due_at || null,
+      is_price_drop: isPriceDrop,
+      is_back_in_stock: isBackInStock,
+      price_change: priceChange,
       latest_outcome: latestLog ? latestLog.outcome : null,
       last_attempt_at: latestLog ? latestLog.attempted_at : null,
       failure_reason: latestLog ? latestLog.failure_reason : null,
@@ -167,6 +185,8 @@ async function addTrackedProduct(detail) {
     brand: detail.brand || null,
     category: detail.category || null,
     sku: detail.sku || null,
+    scrape_interval_minutes: Number(detail.scrape_interval_minutes || 120),
+    next_scrape_due_at: detail.next_scrape_due_at || new Date().toISOString(),
   };
 
   if (supabase) {
@@ -193,6 +213,63 @@ async function addTrackedProduct(detail) {
 }
 
 /**
+ * Update tracked product settings (e.g. scrape_interval_minutes).
+ */
+async function updateTrackedProduct(id, updates = {}) {
+  const allowed = {};
+  if (updates.scrape_interval_minutes !== undefined) {
+    const mins = Number(updates.scrape_interval_minutes);
+    if ([30, 60, 120, 360].includes(mins)) {
+      allowed.scrape_interval_minutes = mins;
+      allowed.next_scrape_due_at = new Date(Date.now() + mins * 60 * 1000).toISOString();
+    }
+  }
+
+  if (supabase) {
+    try {
+      const { data, error } = await supabase
+        .from('tracked_products')
+        .update(allowed)
+        .eq('id', id)
+        .select()
+        .single();
+      if (!error && data) return data;
+    } catch (err) {
+      console.warn('[db] Supabase updateTrackedProduct failed:', err.message);
+    }
+  }
+
+  const p = memDb.products.find((prod) => String(prod.id) === String(id));
+  if (p) {
+    Object.assign(p, allowed);
+    return p;
+  }
+  return null;
+}
+
+/**
+ * Update next_scrape_due_at after an attempt.
+ */
+async function updateNextScrapeDue(trackedProductId, intervalMinutes = 120) {
+  const mins = Number(intervalMinutes) || 120;
+  const nextDue = new Date(Date.now() + mins * 60 * 1000).toISOString();
+
+  if (supabase) {
+    try {
+      await supabase
+        .from('tracked_products')
+        .update({ next_scrape_due_at: nextDue })
+        .eq('id', trackedProductId);
+    } catch (err) {}
+  }
+
+  const p = memDb.products.find((prod) => String(prod.id) === String(trackedProductId));
+  if (p) {
+    p.next_scrape_due_at = nextDue;
+  }
+}
+
+/**
  * Delete product from tracked_products.
  */
 async function deleteTrackedProduct(id) {
@@ -215,7 +292,7 @@ async function getPriceHistory(trackedProductId, limit = 200) {
     try {
       const { data, error } = await supabase
         .from('price_history')
-        .select('id, price, stock_quantity, scraped_at')
+        .select('id, price, stock_quantity, is_price_drop, is_back_in_stock, price_change, scraped_at')
         .eq('tracked_product_id', trackedProductId)
         .order('scraped_at', { ascending: true })
         .limit(limit);
@@ -230,7 +307,7 @@ async function getPriceHistory(trackedProductId, limit = 200) {
 }
 
 /**
- * Insert a successful price history entry.
+ * Insert a successful price history entry and detect alerts (price-drop / back-in-stock).
  */
 async function insertPriceHistory(trackedProductId, price, stockQuantity) {
   const numPrice = Number(price);
@@ -239,13 +316,44 @@ async function insertPriceHistory(trackedProductId, price, stockQuantity) {
   // Reject invalid / partial prices from being saved
   if (!Number.isFinite(numPrice) || numPrice < 10) {
     console.warn(`[db] Refusing to insert invalid/suspicious price ₹${price} for product ${trackedProductId}`);
-    return false;
+    return { ok: false, reason: 'price < 10' };
   }
+
+  // Look up the most recent previous price_history entry to detect price drops & back-in-stock
+  let prevRow = null;
+  if (supabase) {
+    try {
+      const { data } = await supabase
+        .from('price_history')
+        .select('price, stock_quantity')
+        .eq('tracked_product_id', trackedProductId)
+        .order('scraped_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (data) prevRow = data;
+    } catch (err) {}
+  }
+  if (!prevRow) {
+    const memRows = memDb.priceHistory
+      .filter((h) => String(h.tracked_product_id) === String(trackedProductId))
+      .sort((a, b) => new Date(b.scraped_at) - new Date(a.scraped_at));
+    if (memRows.length > 0) prevRow = memRows[0];
+  }
+
+  const prevPrice = prevRow ? Number(prevRow.price) : null;
+  const prevStock = prevRow ? Number(prevRow.stock_quantity) : null;
+
+  const isPriceDrop = Boolean(prevPrice !== null && Number.isFinite(prevPrice) && numPrice < prevPrice);
+  const priceChange = isPriceDrop ? Number((prevPrice - numPrice).toFixed(2)) : 0;
+  const isBackInStock = Boolean(prevStock !== null && prevStock === 0 && numStock > 0);
 
   const row = {
     tracked_product_id: trackedProductId,
     price: numPrice,
     stock_quantity: numStock,
+    is_price_drop: isPriceDrop,
+    is_back_in_stock: isBackInStock,
+    price_change: priceChange,
   };
 
   if (supabase) {
@@ -261,7 +369,19 @@ async function insertPriceHistory(trackedProductId, price, stockQuantity) {
     ...row,
     scraped_at: new Date().toISOString(),
   });
-  return true;
+
+  return {
+    ok: true,
+    alert: {
+      isPriceDrop,
+      isBackInStock,
+      priceChange,
+      prevPrice,
+      newPrice: numPrice,
+      prevStock,
+      newStock: numStock,
+    },
+  };
 }
 
 /**
@@ -428,6 +548,8 @@ module.exports = {
   findTrackedBySourceId,
   getTrackedProduct,
   addTrackedProduct,
+  updateTrackedProduct,
+  updateNextScrapeDue,
   deleteTrackedProduct,
   getPriceHistory,
   insertPriceHistory,

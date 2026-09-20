@@ -18,6 +18,8 @@ create table if not exists tracked_products (
     category          text,
     sku               text,
     image_url         text,
+    scrape_interval_minutes integer not null default 120, -- default 2 hours (120 min)
+    next_scrape_due_at      timestamptz default now(),
     added_at          timestamptz not null default now()
 );
 
@@ -32,6 +34,9 @@ create table if not exists price_history (
     tracked_product_id uuid not null references tracked_products(id) on delete cascade,
     price            numeric(12,2) not null check (price > 0),  -- never 0/null/blank
     stock_quantity   integer not null check (stock_quantity >= 0),
+    is_price_drop    boolean not null default false,
+    is_back_in_stock boolean not null default false,
+    price_change     numeric(12,2) default 0,
     scraped_at       timestamptz not null default now()
 );
 create index if not exists idx_price_history_product_time
@@ -62,8 +67,7 @@ create index if not exists idx_scrape_logs_product_time
 
 -- -------------------------------------------------------------------------
 -- scrape_lock
---   Single-row table that prevents two scrape runs from overlapping.
---   We never DELETE the row — we just flip is_running and refresh started_at.
+--   Single-row table for mutual exclusion across concurrent scrape runs.
 -- -------------------------------------------------------------------------
 create table if not exists scrape_lock (
     id           integer primary key default 1 check (id = 1),  -- always row id=1
@@ -92,8 +96,13 @@ select distinct on (tp.id)
        tp.brand,
        tp.category,
        tp.sku,
+       tp.scrape_interval_minutes,
+       tp.next_scrape_due_at,
        ph.price as latest_price,
        ph.stock_quantity as latest_stock,
+       ph.is_price_drop as latest_is_price_drop,
+       ph.is_back_in_stock as latest_is_back_in_stock,
+       ph.price_change as latest_price_change,
        ph.scraped_at as latest_scraped_at
 from tracked_products tp
 left join price_history ph on ph.tracked_product_id = tp.id

@@ -11,12 +11,16 @@ const { chromium } = require('playwright');
 const config = require('../config');
 const db = require('../db/store');
 const { scrapeProduct } = require('../scraper/scraper');
+const { sendPriceDropOrStockAlert } = require('../services/alerts');
 
 const router = express.Router();
 
-// Middleware checking secret header or query param
+// Middleware checking secret header, bearer token, or query param
 function requireCronSecret(req, res, next) {
-  const provided = req.get('X-Cron-Secret') || req.query.secret;
+  const authHeader = req.get('Authorization');
+  const bearerToken = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+  const provided = req.get('X-Cron-Secret') || bearerToken || req.query.secret;
+
   if (!config.cronSecret) {
     return res.status(500).json({ error: 'Server missing CRON_SECRET configuration' });
   }
@@ -80,8 +84,26 @@ router.post('/', requireCronSecret, async (_req, res) => {
     browser = await chromium.launch({ headless: config.scraperHeadless });
 
     for (const product of products) {
-      const t0 = Date.now();
       const sourceId = product.source_product_id || product.id;
+      const now = Date.now();
+      const dueAt = product.next_scrape_due_at ? new Date(product.next_scrape_due_at).getTime() : 0;
+      const isDue = !product.next_scrape_due_at || dueAt <= now;
+
+      // Skip products not yet due
+      if (!isDue) {
+        console.log(`[scrape-trigger] ${runId} — Skipping product ${sourceId} (${product.name}), next due at ${product.next_scrape_due_at}`);
+        perProduct.push({
+          trackedProductId: product.id,
+          sourceProductId: sourceId,
+          name: product.name,
+          outcome: 'skipped',
+          reason: `Not due until ${product.next_scrape_due_at}`,
+          durationSeconds: 0,
+        });
+        continue;
+      }
+
+      const t0 = Date.now();
       console.log(`[scrape-trigger] ${runId} — Scraping product ${sourceId} (${product.name})`);
 
       const result = await scrapeProduct(sourceId, {
@@ -95,8 +117,14 @@ router.post('/', requireCronSecret, async (_req, res) => {
       // Record scrape attempt (Always write scrape_logs; price_history only on success/retried)
       await db.insertScrapeLog(product.id, result);
       if (result.outcome === 'success' || result.outcome === 'retried') {
-        await db.insertPriceHistory(product.id, result.price, result.stock);
+        const histRes = await db.insertPriceHistory(product.id, result.price, result.stock);
+        if (histRes && histRes.alert && (histRes.alert.isPriceDrop || histRes.alert.isBackInStock)) {
+          sendPriceDropOrStockAlert(product, histRes.alert).catch(() => {});
+        }
       }
+
+      // Schedule next scrape time
+      await db.updateNextScrapeDue(product.id, product.scrape_interval_minutes || 120);
 
       perProduct.push({
         trackedProductId: product.id,
