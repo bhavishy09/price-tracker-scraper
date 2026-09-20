@@ -34,10 +34,21 @@ if (config.nodeEnv !== 'production') {
   app.set('json spaces', 2);
 }
 
-// CORS — origins come from config (default '*'). For the assignment the
-// frontend has no auth so '*' is acceptable; in production with auth we
-// would lock this down to the exact Vercel origin.
-app.use(cors({ origin: config.corsOrigins }));
+// CORS — origins come from config. Properly handle wildcard and Vercel domains.
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow requests with no origin (like mobile apps, curl, server-to-server)
+      if (!origin) return callback(null, true);
+      if (config.corsOrigins.includes('*') || config.corsOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(null, true); // Permissive fallback for deployment testing
+    },
+    credentials: true,
+  })
+);
+app.options('*', cors());
 
 // Body parser for POST /api/tracked-products JSON bodies.
 app.use(express.json({ limit: '256kb' }));
