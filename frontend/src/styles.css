@@ -752,37 +752,6 @@ p {
   border: 1px solid #18181b;
 }
 
-/* ----- Automation Banner ----- */
-.automation-banner {
-  margin-top: 36px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 20px 24px;
-  display: flex;
-  align-items: flex-start;
-  gap: 16px;
-}
-
-.automation-icon {
-  font-size: 20px;
-  line-height: 1;
-  color: var(--text);
-}
-
-.automation-text h4 {
-  margin: 0 0 4px;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.automation-text p {
-  margin: 0;
-  font-size: 12px;
-  color: var(--text-muted);
-  line-height: 1.5;
-}
-
 /* ----- Utilities ----- */
 .muted {
   color: var(--text-muted);
