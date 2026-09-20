@@ -83,4 +83,9 @@ export const api = {
 
   // Scrape lock status
   getScrapeStatus: () => httpGet('/api/scrape-trigger/status'),
+
+  // Notifications
+  getNotifications: () => httpGet('/api/notifications'),
+  dismissNotification: (id) => httpPost(`/api/notifications/${id}/dismiss`),
+  dismissAllNotifications: () => httpPost('/api/notifications/dismiss-all'),
 };

@@ -10,6 +10,7 @@ import { Routes, Route, NavLink, Link } from 'react-router-dom';
 import Dashboard from './components/Dashboard.jsx';
 import ProductDetail from './components/ProductDetail.jsx';
 import ScrapeStatusPill from './components/ScrapeStatusPill.jsx';
+import NotificationsBell from './components/NotificationsBell.jsx';
 
 export default function App() {
   return (
@@ -28,7 +29,10 @@ export default function App() {
               Mock store <span>↗</span>
             </a>
           </nav>
-          <ScrapeStatusPill />
+          <div className="header-right-actions">
+            <ScrapeStatusPill />
+            <NotificationsBell />
+          </div>
         </div>
       </header>
 
