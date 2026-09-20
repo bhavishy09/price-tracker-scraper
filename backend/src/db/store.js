@@ -233,16 +233,27 @@ async function getPriceHistory(trackedProductId, limit = 200) {
  * Insert a successful price history entry.
  */
 async function insertPriceHistory(trackedProductId, price, stockQuantity) {
+  const numPrice = Number(price);
+  const numStock = Number(stockQuantity);
+
+  // Reject invalid / partial prices from being saved
+  if (!Number.isFinite(numPrice) || numPrice < 10) {
+    console.warn(`[db] Refusing to insert invalid/suspicious price ₹${price} for product ${trackedProductId}`);
+    return false;
+  }
+
   const row = {
     tracked_product_id: trackedProductId,
-    price: Number(price),
-    stock_quantity: Number(stockQuantity),
+    price: numPrice,
+    stock_quantity: numStock,
   };
 
   if (supabase) {
     try {
       await supabase.from('price_history').insert(row);
-    } catch (err) {}
+    } catch (err) {
+      console.warn('[db] Supabase insertPriceHistory failed:', err.message);
+    }
   }
 
   memDb.priceHistory.push({
@@ -252,6 +263,36 @@ async function insertPriceHistory(trackedProductId, price, stockQuantity) {
   });
   return true;
 }
+
+/**
+ * Purge invalid or artifact price history entries (e.g. price < 10).
+ */
+async function purgeInvalidPriceHistory() {
+  if (supabase) {
+    try {
+      const { data, error } = await supabase
+        .from('price_history')
+        .delete()
+        .lt('price', 10)
+        .select();
+      if (!error && data?.length) {
+        console.log(`[db] Purged ${data.length} invalid price_history rows from Supabase`);
+      }
+    } catch (err) {
+      console.warn('[db] Supabase purge failed:', err.message);
+    }
+  }
+
+  const beforeCount = memDb.priceHistory.length;
+  memDb.priceHistory = memDb.priceHistory.filter((h) => h.price >= 10);
+  const purged = beforeCount - memDb.priceHistory.length;
+  if (purged > 0) {
+    console.log(`[db] Purged ${purged} invalid price_history rows from memory store`);
+  }
+}
+
+// Automatically purge invalid entries on init
+purgeInvalidPriceHistory().catch(() => {});
 
 /**
  * Fetch scrape logs for a product.
@@ -395,4 +436,5 @@ module.exports = {
   getLockStatus,
   tryAcquireLock,
   releaseLock,
+  purgeInvalidPriceHistory,
 };
