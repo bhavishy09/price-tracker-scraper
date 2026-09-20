@@ -212,6 +212,9 @@ shared libraries it links against, which Render's base image is missing.
 | `HEADLESS`                     | no       | `false` → run scraper headed (demo recording). Anything else → headless. |
 | `SCRAPER_CONCURRENCY`          | no       | Default `1`. How many products to scrape in parallel. Keep at 1.       |
 | `SCRAPE_STALE_AFTER_MINUTES`   | no       | Default `15`. If a run crashes without releasing the lock, the next run forcibly takes it after this long. |
+| `SENDGRID_API_KEY`             | no       | SendGrid API key for automated price-drop and back-in-stock email alerts. |
+| `ALERT_EMAIL`                  | no       | Target email address to receive price-drop & back-in-stock alerts. |
+| `SENDGRID_FROM_EMAIL`          | no       | Verified sender email on SendGrid. Default `alerts@ine-tracker.local`. |
 | `CORS_ORIGINS`                 | no       | Default `*`. Comma-separated allowed origins. Lock down in production with auth. |
 | `PORT`                         | no       | Default `3001`. Render injects this automatically.                     |
 | `NODE_ENV`                     | no       | `production` for less verbose logging.                                 |
@@ -309,16 +312,29 @@ live.
 
 ---
 
+## Bonus features implemented
+
+The following three bonus features from the assignment specification are fully implemented:
+
+1. **In-App Price-Drop & Back-in-Stock Alerts**:
+   - Each successful scrape automatically evaluates against the product's historical price and stock.
+   - If the new price is lower than the previous one, `is_price_drop` is flagged and `price_change` is calculated.
+   - If stock transitions from 0 to positive, `is_back_in_stock` is flagged.
+   - Displayed with high-contrast, editorial badges (`▼ Price drop (-₹X)` and `● Back in stock`) on both the dashboard tracked list and product detail page, as well as highlighted in the historical timeline table.
+
+2. **Configurable Scrape Frequency per Product**:
+   - Each product has a dedicated `scrape_interval_minutes` setting (selectable from `30m`, `1h`, `2h`, `6h`) and a `next_scrape_due_at` timestamp.
+   - The user can change the frequency on either the dashboard or product detail page via a clean inline selector.
+   - When external cron triggers hit `/api/scrape-trigger`, the backend checks whether `next_scrape_due_at <= now()`, scraping only due items and cleanly skipping others with clear logged diagnostics.
+
+3. **Email Alerts via SendGrid**:
+   - When a price drop or back-in-stock event is recorded, an alert is dispatched to `ALERT_EMAIL` using SendGrid (`https://api.sendgrid.com/v3/mail/send`).
+   - Runs in complete isolation with strict timeouts and try/catch guarantees — network outages or unconfigured API keys will never interrupt, slow down, or fail the core scraping and logging cycle.
+
+---
+
 ## What I'd improve next (given more time)
 
-In priority order (these are the bonus features from the spec, NOT
-implemented in the current submission):
+1. **Page-structure change detection** — hash the rendered HTML layout or track structural element counts and flag in `scrape_logs` if the store updates its DOM hierarchy.
+2. **Webhook notifications** — allow users to configure Discord or Slack webhook endpoints for instant team notifications.
 
-1. **Configurable per-product scrape frequency** — would require a
-   `scrape_frequency_minutes` column + a smarter trigger that filters
-   products due for scraping rather than always scraping all of them.
-2. **Page-structure change detection** — hash the rendered HTML after
-   scrape and compare to the last known hash; flag in `scrape_logs` if it
-   changed.
-3. **Price-drop / back-in-stock alerts** — SendGrid email on transition.
-4. **CI/CD via GitHub Actions** — explicitly OUT OF SCOPE per the spec.
